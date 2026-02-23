@@ -20,6 +20,16 @@ info:
     - Multi-country support (15+ African countries)
     - USD currency for pan-African operations
     
+    **Owner Authentication Flow:**
+    1. **New Owners**: Register → Verify OTP → Set PIN → Login with PIN
+    2. **Existing Owners**: Login with phone + PIN (no OTP needed)
+    3. **Legacy/Forgot PIN**: Use OTP login → Reset PIN
+    
+    **Recommended Endpoints:**
+    - New registration: `POST /auth/register-owner` → `POST /auth/verify-otp` → `POST /auth/set-pin`
+    - Daily login: `POST /auth/login-owner-pin` (fast, offline-capable)
+    - Forgot PIN: `POST /auth/login-owner` → `POST /auth/verify-otp` → `POST /auth/set-pin`
+    
     **Recent Changes (v1.2.0):**
     - Added owner PIN authentication for daily login (no OTP needed)
     - New endpoint: POST /auth/set-pin (set PIN after OTP verification)
@@ -986,96 +996,6 @@ paths:
               example:
                 success: false
                 message: "This phone number is already registered. Please use the login endpoint instead."
-
-  /auth/login-owner:
-    post:
-      summary: Login EXISTING shop owner and send OTP
-      description: |
-        **Step 1 of owner login (EXISTING OWNERS ONLY)**
-        
-        Sends a 4-digit OTP to an existing owner's phone for authentication.
-        
-        **IMPORTANT**: This endpoint is for EXISTING owners only. If you don't have an account, use `/auth/register-owner` instead.
-        
-        **Flow:**
-        1. Owner provides phone number only
-        2. System validates owner exists
-        3. System generates 4-digit OTP (crypto-secure)
-        4. System sends OTP via WhatsApp/SMS
-        5. In development mode, OTP is returned in response as `dev_otp`
-        
-        **OTP Generation:**
-        - OTP is always random 4-digit (1000-9999) using crypto-secure generation
-        - In development mode, OTP is visible in response as `dev_otp` for testing
-        - OTP sent via WhatsApp (preferred) or SMS (fallback)
-        - OTP expires in 5 minutes
-      tags: [Auth]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required:
-                - phone
-              properties:
-                phone:
-                  type: string
-                  example: "+254712345678"
-            examples:
-              kenyan_owner:
-                summary: Kenyan Owner Login
-                value:
-                  phone: "+254712345678"
-              nigerian_owner:
-                summary: Nigerian Owner Login
-                value:
-                  phone: "+2348012345678"
-      responses:
-        "200":
-          description: OTP sent successfully
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  success:
-                    type: boolean
-                    example: true
-                  message:
-                    type: string
-                    example: "OTP sent to +254712345678"
-                  owner_name:
-                    type: string
-                    example: "Amina Yusuf"
-                  shop_name:
-                    type: string
-                    example: "Amina Ventures"
-                  sms_status:
-                    type: string
-                    example: "development"
-                  dev_otp:
-                    type: string
-                    example: "1234"
-              examples:
-                development_mode:
-                  summary: Development Mode Response
-                  value:
-                    success: true
-                    message: "OTP sent to +254712345678"
-                    owner_name: "Amina Yusuf"
-                    shop_name: "Amina Ventures"
-                    sms_status: "development"
-                    dev_otp: "7392"
-        "404":
-          description: No account found with this phone number
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-              example:
-                success: false
-                message: "No account found with this phone number. Please register first."
 
   /auth/verify-otp:
     post:
