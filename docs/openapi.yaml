@@ -2,7 +2,7 @@ openapi: 3.0.0
 
 info:
   title: Smart Loss Control API
-  version: 1.1.0
+  version: 1.2.0
   description: |
     Smart Loss Control Backend API (Web MVP) - Pan-African Edition.
     Designed for FMCG cooking oil inventory reconciliation with offline-first sales logging,
@@ -12,7 +12,7 @@ info:
     - Offline-first sales logging with IndexedDB sync
     - AI-powered anomaly detection (variance >10% triggers alerts)
     - QR-based staff onboarding with 4-digit PIN authentication
-    - Owner authentication with 4-digit OTP via WhatsApp/SMS
+    - Owner authentication with 4-digit PIN (offline-capable after registration)
     - Staff login via name + PIN (no OTP required)
     - Bulk-to-retail conversion (carton → 12 bottles)
     - WhatsApp/SMS alert notifications
@@ -20,7 +20,15 @@ info:
     - Multi-country support (15+ African countries)
     - USD currency for pan-African operations
     
-    **Recent Changes (v1.1.0):**
+    **Recent Changes (v1.2.0):**
+    - Added owner PIN authentication for daily login (no OTP needed)
+    - New endpoint: POST /auth/set-pin (set PIN after OTP verification)
+    - New endpoint: POST /auth/login-owner-pin (daily login with phone + PIN)
+    - Owner registration now 3-step: Register → Verify OTP → Set PIN
+    - PIN-based login works offline (no internet needed after setup)
+    - Reduced SMS costs (OTP only needed once during registration)
+    
+    **Previous Changes (v1.1.0):**
     - OTP changed to 4-digit (matches frontend design)
     - Staff authentication changed from phone+PIN to name+PIN
     - QR code generation moved from /shops/qr-token to /auth/generate-qr
@@ -38,10 +46,10 @@ servers:
 tags:
   - name: Auth
     description: Owner/Staff authentication, onboarding, and device linking
+  - name: Dashboard
+    description: Owner dashboard with key metrics and shop health
   - name: Shops
     description: Shop setup and staff management
-  - name: SKUs
-    description: Cooking oil SKU catalog management
   - name: Inventory
     description: Restock, stock adjustments, and decant operations
   - name: Sales
@@ -140,7 +148,7 @@ components:
           description: "Owner's phone number with country code"
         otp:
           type: string
-          example: "1234"
+          example: "5847"
           description: "4-digit OTP code received via WhatsApp/SMS"
           pattern: "^[0-9]{4}$"
 
@@ -185,7 +193,7 @@ components:
               format: uuid
         dev_otp:
           type: string
-          example: "1234"
+          example: "5847"
           description: "4-digit OTP code (only in development mode)"
           pattern: "^[0-9]{4}$"
         sms_status:
@@ -313,15 +321,6 @@ components:
               type: string
               example: "Staff scans QR → Enters name + PIN → Device linked"
 
-    RevokeStaffAccessRequest:
-      type: object
-      required:
-        - staff_id
-      properties:
-        staff_id:
-          type: string
-          format: uuid
-
     QRStatusResponse:
       type: object
       properties:
@@ -423,6 +422,29 @@ components:
     # -------------------------
     # INVENTORY
     # -------------------------
+    SKU:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        brand:
+          type: string
+          example: "King's Oil"
+        size:
+          type: string
+          example: "5L"
+        is_carton:
+          type: boolean
+          example: false
+        units_per_carton:
+          type: integer
+          example: 12
+        created_at:
+          type: string
+          format: date-time
+
     InventoryItem:
       type: object
       properties:
@@ -488,12 +510,33 @@ components:
         message:
           type: string
           example: "Restock recorded successfully"
-        discrepancy:
-          type: integer
-          example: -2
-        inventory_after:
-          type: integer
-          example: 98
+        restock:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            ordered_qty:
+              type: integer
+              example: 100
+            received_qty:
+              type: integer
+              example: 98
+            discrepancy:
+              type: integer
+              example: -2
+              description: "Difference between received and ordered (negative = shortage)"
+            supplier_name:
+              type: string
+              example: "Lagos Distributors Ltd"
+              nullable: true
+            inventory_after:
+              type: integer
+              example: 98
+              description: "Total inventory quantity after restock"
+            recorded_at:
+              type: string
+              format: date-time
 
     DecantRequest:
       type: object
@@ -872,26 +915,26 @@ paths:
   # -------------------------
   /auth/register-owner:
     post:
-      summary: Register shop owner and send 4-digit OTP
+      summary: Register NEW shop owner and send OTP
       description: |
-        **Step 1 of owner authentication**
+        **Step 1 of owner registration (NEW OWNERS ONLY)**
         
         Creates a new shop and owner account, then sends a 4-digit OTP via WhatsApp (preferred) or SMS (fallback).
         
+        **IMPORTANT**: This endpoint is for NEW registrations only. If you already have an account, use `/auth/login-owner` instead.
+        
         **Flow:**
-        1. Owner provides name, shop name, and phone number
-        2. System creates shop and owner account
-        3. System generates 4-digit OTP (crypto-secure)
-        4. System sends OTP via WhatsApp/SMS
-        5. In development mode, OTP is returned in response as `dev_otp`
+        1. Owner provides name, shop name, and phone number (ALL REQUIRED)
+        2. System validates phone is not already registered
+        3. System creates shop and owner account
+        4. System generates 4-digit OTP (crypto-secure)
+        5. System sends OTP via WhatsApp/SMS
+        6. In development mode, OTP is returned in response as `dev_otp`
         
-        **Development Mode:**
-        - OTP is always `1234`
-        - OTP is visible in response for testing
-        
-        **Production Mode:**
-        - OTP is random 4-digit (1000-9999)
-        - OTP sent via WhatsApp or SMS
+        **OTP Generation:**
+        - OTP is always random 4-digit (1000-9999) using crypto-secure generation
+        - In development mode, OTP is visible in response as `dev_otp` for testing
+        - OTP sent via WhatsApp (preferred) or SMS (fallback)
         - OTP expires in 5 minutes
       tags: [Auth]
       requestBody:
@@ -915,7 +958,7 @@ paths:
                   phone: "+2348012345678"
       responses:
         "201":
-          description: OTP sent successfully (check WhatsApp/SMS or dev_otp field)
+          description: Registration successful, OTP sent
           content:
             application/json:
               schema:
@@ -925,23 +968,114 @@ paths:
                   summary: Development Mode Response
                   value:
                     success: true
-                    message: "OTP sent to +254712345678"
+                    message: "Registration successful! OTP sent to +254712345678"
                     sms_status: "development"
-                    dev_otp: "1234"
-                production_mode:
-                  summary: Production Mode Response
-                  value:
-                    success: true
-                    message: "OTP sent to +254712345678"
-                    sms_status: "production"
-                    channel: "whatsapp"
-                    sms_sid: "SMxxxxxxxxxxxxxxxx"
+                    dev_otp: "5847"
         "400":
           description: Validation error (missing required fields)
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Phone number already registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: "This phone number is already registered. Please use the login endpoint instead."
+
+  /auth/login-owner:
+    post:
+      summary: Login EXISTING shop owner and send OTP
+      description: |
+        **Step 1 of owner login (EXISTING OWNERS ONLY)**
+        
+        Sends a 4-digit OTP to an existing owner's phone for authentication.
+        
+        **IMPORTANT**: This endpoint is for EXISTING owners only. If you don't have an account, use `/auth/register-owner` instead.
+        
+        **Flow:**
+        1. Owner provides phone number only
+        2. System validates owner exists
+        3. System generates 4-digit OTP (crypto-secure)
+        4. System sends OTP via WhatsApp/SMS
+        5. In development mode, OTP is returned in response as `dev_otp`
+        
+        **OTP Generation:**
+        - OTP is always random 4-digit (1000-9999) using crypto-secure generation
+        - In development mode, OTP is visible in response as `dev_otp` for testing
+        - OTP sent via WhatsApp (preferred) or SMS (fallback)
+        - OTP expires in 5 minutes
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - phone
+              properties:
+                phone:
+                  type: string
+                  example: "+254712345678"
+            examples:
+              kenyan_owner:
+                summary: Kenyan Owner Login
+                value:
+                  phone: "+254712345678"
+              nigerian_owner:
+                summary: Nigerian Owner Login
+                value:
+                  phone: "+2348012345678"
+      responses:
+        "200":
+          description: OTP sent successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "OTP sent to +254712345678"
+                  owner_name:
+                    type: string
+                    example: "Amina Yusuf"
+                  shop_name:
+                    type: string
+                    example: "Amina Ventures"
+                  sms_status:
+                    type: string
+                    example: "development"
+                  dev_otp:
+                    type: string
+                    example: "1234"
+              examples:
+                development_mode:
+                  summary: Development Mode Response
+                  value:
+                    success: true
+                    message: "OTP sent to +254712345678"
+                    owner_name: "Amina Yusuf"
+                    shop_name: "Amina Ventures"
+                    sms_status: "development"
+                    dev_otp: "7392"
+        "404":
+          description: No account found with this phone number
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                success: false
+                message: "No account found with this phone number. Please register first."
 
   /auth/verify-otp:
     post:
@@ -964,11 +1098,9 @@ paths:
         - Rate limiting: Max 5 attempts per 15 minutes
         - Token expires after 12 hours
         
-        **Development Mode:**
-        - Use OTP `1234` (always works)
-        
-        **Production Mode:**
-        - Use OTP from WhatsApp/SMS
+        **OTP Values:**
+        - OTP is always random 4-digit (1000-9999)
+        - In development mode, use the `dev_otp` value from the login/register response
       tags: [Auth]
       requestBody:
         required: true
@@ -976,12 +1108,12 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/OTPVerifyRequest"
-            examples:
-              verify_otp:
-                summary: Verify OTP
-                value:
-                  phone: "+254712345678"
-                  otp: "1234"
+              examples:
+                verify_otp:
+                  summary: Verify OTP
+                  value:
+                    phone: "+254712345678"
+                    otp: "5847"
       responses:
         "200":
           description: OTP verified successfully, JWT token returned
@@ -1025,6 +1157,240 @@ paths:
                   value:
                     success: false
                     message: "Too many OTP requests. Please wait 15 minutes and try again."
+
+  /auth/set-pin:
+    post:
+      summary: Set 4-digit PIN for owner (Step 3 of registration)
+      description: |
+        **Step 3 of owner registration (NEW!)**
+        
+        After OTP verification, owner creates a 4-digit PIN for daily login.
+        This enables offline-capable authentication without OTP for subsequent logins.
+        
+        **Flow:**
+        1. Owner verifies OTP (Step 2)
+        2. Owner creates 4-digit PIN
+        3. System hashes PIN with bcrypt
+        4. System stores PIN hash in database
+        5. Owner receives JWT token
+        
+        **Security:**
+        - PIN must be exactly 4 digits (0-9)
+        - PIN is hashed with bcrypt (10 salt rounds)
+        - PIN can only be set once (use reset-pin to change)
+        - Requires recent OTP verification (within 10 minutes)
+        
+        **Benefits:**
+        - Daily login without OTP (faster)
+        - Works offline after initial setup
+        - No SMS costs for daily login
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - phone
+                - pin
+              properties:
+                phone:
+                  type: string
+                  pattern: '^\+[1-9]\d{1,14}$'
+                  example: "+254712345678"
+                  description: Owner's phone number (from registration)
+                pin:
+                  type: string
+                  pattern: '^\d{4}$'
+                  example: "1234"
+                  description: 4-digit PIN (numeric only)
+            examples:
+              set_pin:
+                summary: Set PIN
+                value:
+                  phone: "+254712345678"
+                  pin: "1234"
+      responses:
+        "200":
+          description: PIN set successfully, JWT token returned
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "PIN set successfully. You can now login with your phone and PIN."
+                  token:
+                    type: string
+                    example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                  user:
+                    $ref: "#/components/schemas/User"
+              examples:
+                success:
+                  summary: PIN Set Successfully
+                  value:
+                    success: true
+                    message: "PIN set successfully. You can now login with your phone and PIN."
+                    token: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                    user:
+                      id: "uuid-here"
+                      shop_id: "shop-uuid"
+                      full_name: "Amina Yusuf"
+                      phone: "+254712345678"
+                      role: "OWNER"
+        "400":
+          description: Validation error or PIN already set
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                invalid_pin:
+                  summary: Invalid PIN Format
+                  value:
+                    success: false
+                    message: "PIN must be exactly 4 digits (0-9)"
+                already_set:
+                  summary: PIN Already Set
+                  value:
+                    success: false
+                    message: "PIN already set. Use the PIN reset endpoint to change it."
+                no_otp:
+                  summary: No Recent OTP Verification
+                  value:
+                    success: false
+                    message: "No recent OTP verification found. Please verify OTP first."
+        "404":
+          description: Owner not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                not_found:
+                  summary: Owner Not Found
+                  value:
+                    success: false
+                    message: "Owner not found. Please register first."
+
+  /auth/login-owner-pin:
+    post:
+      summary: Owner daily login with phone + PIN (no OTP needed)
+      description: |
+        **Daily owner login (NEW!)**
+        
+        Owners login using phone number and 4-digit PIN. No OTP required after initial registration.
+        This endpoint works offline after the JWT token is cached.
+        
+        **Flow:**
+        1. Owner enters phone number
+        2. Owner enters 4-digit PIN
+        3. System validates PIN against stored hash
+        4. System generates JWT token
+        5. Owner is logged in
+        
+        **Security:**
+        - PIN is validated using bcrypt comparison (timing-safe)
+        - Account must be active
+        - PIN must have been set during registration
+        
+        **Benefits:**
+        - Instant login (no waiting for OTP)
+        - Works offline (after initial setup)
+        - No SMS costs
+        - Faster user experience
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - phone
+                - pin
+              properties:
+                phone:
+                  type: string
+                  pattern: '^\+[1-9]\d{1,14}$'
+                  example: "+254712345678"
+                  description: Owner's phone number
+                pin:
+                  type: string
+                  pattern: '^\d{4}$'
+                  example: "1234"
+                  description: 4-digit PIN
+            examples:
+              login:
+                summary: Owner Login
+                value:
+                  phone: "+254712345678"
+                  pin: "1234"
+      responses:
+        "200":
+          description: Login successful, JWT token returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+              examples:
+                success:
+                  summary: Successful Login
+                  value:
+                    success: true
+                    token: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                    user:
+                      id: "uuid-here"
+                      shop_id: "shop-uuid"
+                      full_name: "Amina Yusuf"
+                      phone: "+254712345678"
+                      role: "OWNER"
+        "400":
+          description: Validation error or PIN not set
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                invalid_format:
+                  summary: Invalid PIN Format
+                  value:
+                    success: false
+                    message: "PIN must be exactly 4 digits"
+                pin_not_set:
+                  summary: PIN Not Set
+                  value:
+                    success: false
+                    message: "PIN not set. Please complete registration by setting your PIN."
+        "401":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                invalid_credentials:
+                  summary: Invalid Phone or PIN
+                  value:
+                    success: false
+                    message: "Invalid phone or PIN"
+        "403":
+          description: Account deactivated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                deactivated:
+                  summary: Account Deactivated
+                  value:
+                    success: false
+                    message: "Account is deactivated"
 
   /auth/login-pin:
     post:
@@ -1140,54 +1506,712 @@ paths:
   # -------------------------
   /shops/me:
     get:
-      summary: Fetch current shop profile (owner/staff)
+      summary: Get shop profile with stats
+      description: |
+        Returns shop details, owner information, and key statistics.
+        
+        **Accessible by:** Owner and Staff (both can view)
+        
+        **Returns:**
+        - Shop name, owner phone, creation date
+        - Active staff count
+        - Total products in inventory
+        - Total inventory value
+        - Owner details (name, phone, join date, last login)
       tags: [Shops]
+      security:
+        - BearerAuth: []
       responses:
         "200":
-          description: Shop profile
+          description: Shop profile retrieved successfully
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Shop"
-
-  /shops/staff/revoke:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  shop:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                      shop_name:
+                        type: string
+                        example: "Amina Ventures"
+                      owner_phone:
+                        type: string
+                        example: "+254712345678"
+                      created_at:
+                        type: string
+                        format: date-time
+                      stats:
+                        type: object
+                        properties:
+                          active_staff:
+                            type: integer
+                            example: 3
+                          total_products:
+                            type: integer
+                            example: 12
+                          inventory_value:
+                            type: string
+                            example: "1250000.00"
+                          currency:
+                            type: string
+                            example: "USD"
+                  owner:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                      full_name:
+                        type: string
+                        example: "Amina Yusuf"
+                      phone:
+                        type: string
+                        example: "+254712345678"
+                      joined_at:
+                        type: string
+                        format: date-time
+                      last_login:
+                        type: string
+                        format: date-time
+        "401":
+          description: Unauthorized - Invalid or missing token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Shop not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    
     patch:
-      summary: Revoke staff access (Owner only)
+      summary: Update shop profile (owner only)
+      description: |
+        Allows shop owner to update the shop name.
+        
+        **Security:**
+        - Only OWNER role can update
+        - RLS enforced (can only update own shop)
+        - Input validation (2-150 characters)
+        - Sanitization applied
       tags: [Shops]
+      security:
+        - BearerAuth: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/RevokeStaffAccessRequest"
+              type: object
+              required:
+                - shop_name
+              properties:
+                shop_name:
+                  type: string
+                  minLength: 2
+                  maxLength: 150
+                  example: "Amina Ventures - Updated"
       responses:
         "200":
-          description: Staff revoked successfully
+          description: Shop profile updated successfully
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ApiResponse"
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "Shop profile updated successfully"
+                  shop:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                      shop_name:
+                        type: string
+                        example: "Amina Ventures - Updated"
+                      created_at:
+                        type: string
+                        format: date-time
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden - Only owners can update shop profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
-  # -------------------------
-  # SKUS
-  # -------------------------
-  /skus:
+  /shops/staff:
     get:
-      summary: List all available SKUs
-      tags: [SKUs]
+      summary: Get all staff members (owner only)
+      description: |
+        Returns list of all staff members with their status and activity stats.
+        
+        **Security:**
+        - Only OWNER role can access
+        - RLS enforced (only see own shop staff)
+        
+        **Returns:**
+        - Staff ID, name, active status
+        - Device ID and link date
+        - Join date and last login
+        - Sales activity (today and last 7 days)
+      tags: [Shops]
+      security:
+        - BearerAuth: []
       responses:
         "200":
-          description: SKU list
+          description: Staff list retrieved successfully
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/SKU"
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  count:
+                    type: integer
+                    example: 3
+                  staff:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                          format: uuid
+                        full_name:
+                          type: string
+                          example: "Chinedu"
+                        is_active:
+                          type: boolean
+                          example: true
+                        device_id:
+                          type: string
+                          example: "android-device-xyz-123"
+                        joined_at:
+                          type: string
+                          format: date-time
+                        device_linked_at:
+                          type: string
+                          format: date-time
+                        last_login:
+                          type: string
+                          format: date-time
+                          nullable: true
+                        activity:
+                          type: object
+                          properties:
+                            sales_today:
+                              type: integer
+                              example: 5
+                            sales_last_7_days:
+                              type: integer
+                              example: 42
+        "403":
+          description: Forbidden - Only owners can view staff list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
+  /shops/staff/{staff_id}:
+    get:
+      summary: Get staff member details (owner only)
+      description: |
+        Returns detailed information about a specific staff member.
+        
+        **Security:**
+        - Only OWNER role can access
+        - UUID validation
+        - RLS enforced
+        
+        **Returns:**
+        - Staff profile (ID, name, status, device)
+        - Detailed activity stats (today, 7 days, 30 days, total)
+      tags: [Shops]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: staff_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Staff member UUID
+      responses:
+        "200":
+          description: Staff details retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  staff:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                      full_name:
+                        type: string
+                        example: "Chinedu"
+                      is_active:
+                        type: boolean
+                        example: true
+                      device_id:
+                        type: string
+                        example: "android-device-xyz-123"
+                      joined_at:
+                        type: string
+                        format: date-time
+                      device_linked_at:
+                        type: string
+                        format: date-time
+                      last_login:
+                        type: string
+                        format: date-time
+                        nullable: true
+                      activity:
+                        type: object
+                        properties:
+                          sales_today:
+                            type: integer
+                            example: 5
+                          sales_last_7_days:
+                            type: integer
+                            example: 42
+                          sales_last_30_days:
+                            type: integer
+                            example: 156
+                          total_sales:
+                            type: integer
+                            example: 892
+        "400":
+          description: Invalid staff ID format
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden - Only owners can view staff details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Staff member not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /shops/staff/{staff_id}/revoke:
+    patch:
+      summary: Revoke staff access (deactivate)
+      description: |
+        Owner can deactivate a staff member's access.
+        
+        **Security:**
+        - Only OWNER role can revoke
+        - Cannot revoke self
+        - Cannot revoke other owners
+        - UUID validation
+        - Session invalidation on revoke
+        - Audit logging
+        
+        **Effects:**
+        - Sets is_active = false
+        - Deletes all active sessions
+        - Staff cannot login until reactivated
+      tags: [Shops]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: staff_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Staff member UUID to deactivate
+      responses:
+        "200":
+          description: Staff access revoked successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "Access revoked for Chinedu"
+                  staff:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                      full_name:
+                        type: string
+                        example: "Chinedu"
+                      is_active:
+                        type: boolean
+                        example: false
+        "400":
+          description: Validation error (invalid ID, already inactive, cannot revoke self)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden - Only owners can revoke access
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Staff member not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /shops/staff/{staff_id}/reactivate:
+    patch:
+      summary: Reactivate staff access
+      description: |
+        Owner can reactivate a previously deactivated staff member.
+        
+        **Security:**
+        - Only OWNER role can reactivate
+        - UUID validation
+        - RLS enforced
+        
+        **Effects:**
+        - Sets is_active = true
+        - Staff can login again
+      tags: [Shops]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: staff_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Staff member UUID to reactivate
+      responses:
+        "200":
+          description: Staff access reactivated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "Access reactivated for Chinedu"
+                  staff:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                      full_name:
+                        type: string
+                        example: "Chinedu"
+                      is_active:
+                        type: boolean
+                        example: true
+        "400":
+          description: Validation error (invalid ID, already active)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden - Only owners can reactivate access
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Staff member not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # -------------------------
+  # DASHBOARD
+  # -------------------------
+  /dashboard/overview:
+    get:
+      summary: Get dashboard overview with key metrics
+      description: |
+        Returns comprehensive dashboard data for owner/staff home screen.
+        
+        **Accessible by:** Owner and Staff (staff sees limited data)
+        
+        **Returns:**
+        - Shop information
+        - Shop health score (0-100%)
+        - Quick stats (inventory value, sales, alerts, staff)
+        - Recent alerts (top 5 unresolved)
+        - Low stock items (below reorder level)
+        
+        **Health Score Calculation:**
+        - Based on audit logs from last 7 days
+        - 100% - (critical_count × 10% + warning_count × 5%)
+        - SAFE: ≥90%, CAUTION: 70-89%, CRITICAL: <70%
+        
+        **Role Differences:**
+        - Owner: Sees active_staff count
+        - Staff: active_staff always returns 0
+      tags: [Dashboard]
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Dashboard data retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  shop:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                      shop_name:
+                        type: string
+                        example: "Amina Ventures"
+                      owner_phone:
+                        type: string
+                        example: "+254712345678"
+                      created_at:
+                        type: string
+                        format: date-time
+                  stats:
+                    type: object
+                    properties:
+                      inventory_value:
+                        type: string
+                        example: "2400000.00"
+                        description: "Total value of all inventory (quantity × selling_price)"
+                      total_products:
+                        type: integer
+                        example: 12
+                        description: "Number of unique SKUs in inventory"
+                      total_units:
+                        type: integer
+                        example: 487
+                        description: "Total units across all products"
+                      today_sales_count:
+                        type: integer
+                        example: 23
+                        description: "Number of sales transactions today"
+                      today_units_sold:
+                        type: integer
+                        example: 45
+                        description: "Total units sold today"
+                      today_revenue:
+                        type: string
+                        example: "185000.00"
+                        description: "Total revenue from today's sales"
+                      open_alerts:
+                        type: integer
+                        example: 3
+                        description: "Number of unresolved alerts"
+                      active_staff:
+                        type: integer
+                        example: 5
+                        description: "Number of active staff (0 for staff users)"
+                      currency:
+                        type: string
+                        example: "USD"
+                  health:
+                    type: object
+                    properties:
+                      score:
+                        type: number
+                        example: 92
+                        description: "Shop health score (0-100%)"
+                      status:
+                        type: string
+                        enum: [SAFE, CAUTION, CRITICAL]
+                        example: "SAFE"
+                      message:
+                        type: string
+                        example: "No critical alerts today"
+                  recent_alerts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                          format: uuid
+                        product:
+                          type: string
+                          example: "King's Oil 5L"
+                        deviation:
+                          type: integer
+                          example: -3
+                          description: "Negative = missing units"
+                        estimated_loss:
+                          type: number
+                          example: 63000
+                        status:
+                          type: string
+                          enum: [OK, WARNING, CRITICAL]
+                          example: "CRITICAL"
+                        created_at:
+                          type: string
+                          format: date-time
+                        time_ago:
+                          type: string
+                          example: "2h ago"
+                  low_stock_items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        product:
+                          type: string
+                          example: "Mamador 2L"
+                        quantity:
+                          type: integer
+                          example: 4
+                        reorder_level:
+                          type: integer
+                          example: 5
+        "401":
+          description: Unauthorized - Invalid or missing token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Shop not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # -------------------------
   # -------------------------
   # INVENTORY
   # -------------------------
+  /inventory/skus:
+    post:
+      summary: Create new SKU (product)
+      tags: [Inventory]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - brand
+                - size
+              properties:
+                brand:
+                  type: string
+                  example: "King's Oil"
+                size:
+                  type: string
+                  example: "5L"
+                is_carton:
+                  type: boolean
+                  default: false
+                  example: false
+                units_per_carton:
+                  type: integer
+                  default: 12
+                  example: 12
+      responses:
+        "201":
+          description: SKU created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "SKU created successfully"
+                  sku:
+                    $ref: "#/components/schemas/SKU"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    
+    get:
+      summary: Get all SKUs (products)
+      tags: [Inventory]
+      responses:
+        "200":
+          description: List of all SKUs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  count:
+                    type: integer
+                    example: 6
+                  skus:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SKU"
+
   /inventory/summary:
     get:
       summary: Get shop inventory summary
@@ -1202,16 +2226,83 @@ paths:
                 items:
                   $ref: "#/components/schemas/InventoryItem"
 
+  /inventory/sku/{sku_id}:
+    get:
+      summary: Get specific SKU inventory details
+      tags: [Inventory]
+      parameters:
+        - name: sku_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: SKU ID to retrieve
+      responses:
+        "200":
+          description: SKU inventory details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InventoryItem"
+        "404":
+          description: SKU not found in inventory
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /inventory/restock:
     post:
       summary: Record restock (Ordered vs Received)
+      description: |
+        Records a supplier restock with ordered vs received quantities.
+        
+        **Key Features:**
+        - Tracks ordered quantity vs received quantity
+        - Calculates discrepancy automatically
+        - Updates inventory with received quantity
+        - Records supplier name for tracking
+        - Creates transaction log
+        - Updates cost and selling prices
+        
+        **Supplier Tracking:**
+        The `supplier_name` field (optional) helps track:
+        - Which suppliers are delivering
+        - Supplier reliability (discrepancy patterns)
+        - Supply chain audit trail
+        
+        **Discrepancy Handling:**
+        - Positive discrepancy: Received more than ordered (bonus)
+        - Negative discrepancy: Received less than ordered (shortage)
+        - Zero discrepancy: Perfect delivery
       tags: [Inventory]
+      security:
+        - BearerAuth: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
               $ref: "#/components/schemas/RestockRequest"
+            examples:
+              with_supplier:
+                summary: Restock with Supplier Name
+                value:
+                  sku_id: "550e8400-e29b-41d4-a716-446655440000"
+                  ordered_qty: 100
+                  received_qty: 98
+                  cost_price: 18500
+                  sell_price: 21000
+                  supplier_name: "Lagos Distributors Ltd"
+              without_supplier:
+                summary: Restock without Supplier Name
+                value:
+                  sku_id: "550e8400-e29b-41d4-a716-446655440000"
+                  ordered_qty: 50
+                  received_qty: 50
+                  cost_price: 18500
+                  sell_price: 21000
       responses:
         "201":
           description: Restock recorded successfully
@@ -1256,26 +2347,289 @@ paths:
   /sales/sync:
     post:
       summary: Sync offline sales logs (bulk upload)
+      description: |
+        **Offline Sales Synchronization**
+        
+        Staff can log sales offline using IndexedDB and sync them when internet is available.
+        This endpoint accepts bulk sales data and processes them atomically.
+        
+        **Key Features:**
+        - Idempotent sync (duplicate sale_ids are ignored)
+        - Inventory validation (checks sufficient stock)
+        - Atomic processing (all or nothing per sale)
+        - Detailed error reporting
+        
+        **Sale ID Format:**
+        Use client-generated UUIDs for sale_id to ensure uniqueness across devices.
+        
+        **Offline Flow:**
+        1. Staff logs sales in IndexedDB with unique sale_id
+        2. When online, app calls this endpoint with all pending sales
+        3. Server processes each sale and updates inventory
+        4. Duplicates are safely ignored (idempotent)
       tags: [Sales]
+      security:
+        - BearerAuth: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
               $ref: "#/components/schemas/SalesSyncRequest"
+            examples:
+              bulk_sales:
+                summary: Bulk Sales Sync
+                value:
+                  device_id: "android-device-xyz-123"
+                  sales:
+                    - sale_id: "sale-uuid-001"
+                      sku_id: "550e8400-e29b-41d4-a716-446655440000"
+                      quantity: 3
+                      unit_price: 21000
+                      sold_at: "2026-02-16T08:10:00Z"
+                    - sale_id: "sale-uuid-002"
+                      sku_id: "660e8400-e29b-41d4-a716-446655440001"
+                      quantity: 1
+                      unit_price: 95000
+                      sold_at: "2026-02-16T08:15:00Z"
       responses:
         "200":
-          description: Sales sync completed
+          description: All sales processed successfully
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SalesSyncResponse"
+              examples:
+                success:
+                  summary: All Sales Accepted
+                  value:
+                    success: true
+                    message: "Sales sync completed"
+                    summary:
+                      total_submitted: 2
+                      accepted: 2
+                      duplicates_ignored: 0
+                      errors: 0
+        "207":
+          description: Partial success (some sales failed)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SalesSyncResponse"
+                  - type: object
+                    properties:
+                      errors:
+                        type: array
+                        items:
+                          type: string
+              examples:
+                partial_success:
+                  summary: Some Sales Failed
+                  value:
+                    success: true
+                    message: "Sales sync completed"
+                    summary:
+                      total_submitted: 3
+                      accepted: 2
+                      duplicates_ignored: 1
+                      errors: 0
         "400":
-          description: Invalid payload
+          description: Invalid request format
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+
+  /sales/history:
+    get:
+      summary: Get sales transaction history
+      description: |
+        Retrieve paginated sales history with optional filters.
+        Useful for reports, debugging, and audit trails.
+      tags: [Sales]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: start_date
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Filter sales from this date
+          example: "2026-02-01T00:00:00Z"
+        - name: end_date
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Filter sales until this date
+          example: "2026-02-28T23:59:59Z"
+        - name: sku_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: Filter by specific product
+        - name: device_id
+          in: query
+          schema:
+            type: string
+          description: Filter by specific device
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 100
+          description: Number of records per page
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+          description: Number of records to skip
+      responses:
+        "200":
+          description: Sales history retrieved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  pagination:
+                    type: object
+                    properties:
+                      total:
+                        type: integer
+                        example: 150
+                      limit:
+                        type: integer
+                        example: 50
+                      offset:
+                        type: integer
+                        example: 0
+                      pages:
+                        type: integer
+                        example: 3
+                  sales:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                          format: uuid
+                        sku_id:
+                          type: string
+                          format: uuid
+                        brand:
+                          type: string
+                          example: "King's Oil"
+                        size:
+                          type: string
+                          example: "5L"
+                        quantity:
+                          type: integer
+                          example: 3
+                        unit_price:
+                          type: number
+                          example: 21000
+                        total_amount:
+                          type: number
+                          example: 63000
+                        sold_at:
+                          type: string
+                          format: date-time
+                        device_id:
+                          type: string
+                          example: "android-device-xyz-123"
+                        staff_name:
+                          type: string
+                          example: "Chinedu"
+                        sale_id:
+                          type: string
+                          example: "sale-uuid-001"
+
+  /sales/summary:
+    get:
+      summary: Get sales summary statistics
+      description: |
+        Get aggregated sales data for dashboard display.
+        Includes total sales, revenue, top products, etc.
+      tags: [Sales]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [today, week, month]
+            default: today
+          description: Time period for summary
+      responses:
+        "200":
+          description: Sales summary retrieved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  period:
+                    type: string
+                    example: "today"
+                  summary:
+                    type: object
+                    properties:
+                      total_sales:
+                        type: integer
+                        example: 45
+                        description: Number of individual sales transactions
+                      total_units_sold:
+                        type: integer
+                        example: 127
+                        description: Total units/bottles sold
+                      total_revenue:
+                        type: number
+                        example: 2850000
+                        description: Total sales revenue
+                      unique_products:
+                        type: integer
+                        example: 8
+                        description: Number of different products sold
+                      active_devices:
+                        type: integer
+                        example: 3
+                        description: Number of devices that logged sales
+                      currency:
+                        type: string
+                        example: "USD"
+                  top_products:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        brand:
+                          type: string
+                          example: "Mamador"
+                        size:
+                          type: string
+                          example: "1L"
+                        units_sold:
+                          type: integer
+                          example: 45
+                        revenue:
+                          type: number
+                          example: 945000
 
   # -------------------------
   # AUDIT / AI
