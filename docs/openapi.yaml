@@ -2,11 +2,17 @@ openapi: 3.0.0
 
 info:
   title: Smart Loss Control API
-  version: 1.2.0
+  version: 2.0.0
   description: |
     Smart Loss Control Backend API (Web MVP) - Pan-African Edition.
     Designed for FMCG cooking oil inventory reconciliation with offline-first sales logging,
     carton-to-unit decanting, AI-driven spot checks, deviation alerts, and reporting.
+    
+    **Version 2.0.0 - MVP Complete (32/32 Endpoints):**
+    - ✅ PATCH /inventory/skus/{sku_id} - Edit product prices and reorder levels
+    - ✅ GET /sales/profit-summary - Revenue vs profit analysis
+    - ✅ Enhanced GET /dashboard/overview - Now includes profit calculations
+    - ✅ GET /inventory/low-stock - Reorder list with smart suggestions
     
     **Key Features:**
     - Offline-first sales logging with IndexedDB sync
@@ -17,6 +23,9 @@ info:
     - Bulk-to-retail conversion (carton → 12 bottles)
     - WhatsApp/SMS alert notifications
     - Real-time deviation tracking with financial loss calculation
+    - Profit tracking and analysis (revenue vs cost)
+    - Product price management
+    - Low stock alerts with reorder suggestions
     - Multi-country support (15+ African countries)
     - USD currency for pan-African operations
     
@@ -29,10 +38,6 @@ info:
     - New registration: `POST /auth/register-owner` → `POST /auth/verify-otp` → `POST /auth/set-pin`
     - Daily login: `POST /auth/login-owner-pin` (fast, offline-capable)
     - Forgot PIN: `POST /auth/login-owner` → `POST /auth/verify-otp` → `POST /auth/set-pin`
-    
-    **Recent Changes (v1.2.0):**
-    - Added owner PIN authentication for daily login (no OTP needed)
-    - New endpoint: POST /auth/set-pin (set PIN after OTP verification)
     - New endpoint: POST /auth/login-owner-pin (daily login with phone + PIN)
     - Owner registration now 3-step: Register → Verify OTP → Set PIN
     - PIN-based login works offline (no internet needed after setup)
@@ -1087,14 +1092,18 @@ paths:
         After OTP verification, owner creates a 4-digit PIN for daily login.
         This enables offline-capable authentication without OTP for subsequent logins.
         
+        **IMPORTANT:** This endpoint requires the JWT token from OTP verification.
+        The phone number is extracted from the token, so you only need to send the PIN.
+        
         **Flow:**
-        1. Owner verifies OTP (Step 2)
-        2. Owner creates 4-digit PIN
-        3. System hashes PIN with bcrypt
-        4. System stores PIN hash in database
-        5. Owner receives JWT token
+        1. Owner verifies OTP (Step 2) → Gets JWT token
+        2. Owner creates 4-digit PIN (sends token + PIN)
+        3. System extracts user from token
+        4. System hashes PIN with bcrypt
+        5. System stores PIN hash in database
         
         **Security:**
+        - Requires JWT token from OTP verification
         - PIN must be exactly 4 digits (0-9)
         - PIN is hashed with bcrypt (10 salt rounds)
         - PIN can only be set once (use reset-pin to change)
@@ -1105,6 +1114,8 @@ paths:
         - Works offline after initial setup
         - No SMS costs for daily login
       tags: [Auth]
+      security:
+        - BearerAuth: []
       requestBody:
         required: true
         content:
@@ -1112,14 +1123,8 @@ paths:
             schema:
               type: object
               required:
-                - phone
                 - pin
               properties:
-                phone:
-                  type: string
-                  pattern: '^\+[1-9]\d{1,14}$'
-                  example: "+254712345678"
-                  description: Owner's phone number (from registration)
                 pin:
                   type: string
                   pattern: '^\d{4}$'
@@ -1129,11 +1134,10 @@ paths:
               set_pin:
                 summary: Set PIN
                 value:
-                  phone: "+254712345678"
                   pin: "1234"
       responses:
         "200":
-          description: PIN set successfully, JWT token returned
+          description: PIN set successfully
           content:
             application/json:
               schema:
@@ -2132,6 +2136,166 @@ paths:
                     items:
                       $ref: "#/components/schemas/SKU"
 
+  /inventory/skus/{sku_id}:
+    patch:
+      summary: Update product prices and reorder level
+      description: |
+        Edit product details including cost price, selling price, and reorder level.
+        
+        **Owner Only** - Only shop owners can update product details.
+        
+        **Features:**
+        - Update one or more fields (cost_price, selling_price, reorder_level)
+        - Automatic profit margin calculation
+        - Shows before/after changes
+        - Validates all inputs
+        
+        **Use Cases:**
+        - Supplier price changes
+        - Adjust profit margins
+        - Update reorder thresholds
+        - Seasonal pricing adjustments
+      tags: [Inventory]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: sku_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: SKU ID to update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                cost_price:
+                  type: number
+                  format: float
+                  example: 22.00
+                  description: Cost per unit (must be > 0)
+                selling_price:
+                  type: number
+                  format: float
+                  example: 28.00
+                  description: Selling price per unit (must be > 0)
+                reorder_level:
+                  type: integer
+                  example: 20
+                  description: Minimum stock level before reorder alert (must be >= 0)
+            examples:
+              update_prices:
+                summary: Update both prices
+                value:
+                  cost_price: 22.00
+                  selling_price: 28.00
+              update_reorder_level:
+                summary: Update reorder level only
+                value:
+                  reorder_level: 20
+              update_all:
+                summary: Update all fields
+                value:
+                  cost_price: 22.00
+                  selling_price: 28.00
+                  reorder_level: 20
+      responses:
+        "200":
+          description: Product updated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: "Product updated: King's Oil 5L"
+                  product:
+                    type: object
+                    properties:
+                      sku_id:
+                        type: string
+                        format: uuid
+                      brand:
+                        type: string
+                        example: "King's Oil"
+                      size:
+                        type: string
+                        example: "5L"
+                      is_carton:
+                        type: boolean
+                      quantity:
+                        type: integer
+                        example: 120
+                      cost_price:
+                        type: number
+                        example: 22.00
+                      selling_price:
+                        type: number
+                        example: 28.00
+                      reorder_level:
+                        type: integer
+                        example: 20
+                      profit_margin:
+                        type: number
+                        example: 21.43
+                        description: Calculated profit margin percentage
+                      updated_at:
+                        type: string
+                        format: date-time
+                  changes:
+                    type: object
+                    properties:
+                      cost_price:
+                        type: object
+                        nullable: true
+                        properties:
+                          old:
+                            type: number
+                          new:
+                            type: number
+                      selling_price:
+                        type: object
+                        nullable: true
+                        properties:
+                          old:
+                            type: number
+                          new:
+                            type: number
+                      reorder_level:
+                        type: object
+                        nullable: true
+                        properties:
+                          old:
+                            type: integer
+                          new:
+                            type: integer
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Forbidden - Owner only
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Product not found in inventory
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /inventory/summary:
     get:
       summary: Get shop inventory summary
@@ -2145,6 +2309,208 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/InventoryItem"
+
+  /inventory/low-stock:
+    get:
+      summary: Get low stock items (reorder list)
+      description: |
+        Returns products that are at or below their reorder level.
+        
+        **Use Cases:**
+        - Generate reorder list for suppliers
+        - Identify critical stockouts
+        - Plan purchasing decisions
+        - Prevent lost sales
+        
+        **Severity Levels:**
+        - CRITICAL: Out of stock (quantity = 0) or urgent (< 50% of reorder level)
+        - WARNING: Low stock (quantity ≤ reorder level)
+        
+        **Smart Features:**
+        - Suggested order quantities
+        - Estimated reorder costs
+        - Days until stockout prediction
+        - Last sale timestamp
+        - Sortable and filterable
+      tags: [Inventory]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: severity
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [critical, warning]
+          description: Filter by severity level
+        - name: brand
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Filter by brand name (case-insensitive partial match)
+        - name: sort
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [severity, quantity, brand]
+            default: severity
+          description: Sort order (severity = most urgent first)
+      responses:
+        "200":
+          description: Low stock items list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  count:
+                    type: integer
+                    example: 8
+                  low_stock_items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        sku_id:
+                          type: string
+                          format: uuid
+                        brand:
+                          type: string
+                          example: "Fortune"
+                        size:
+                          type: string
+                          example: "5L"
+                        is_carton:
+                          type: boolean
+                        quantity:
+                          type: integer
+                          example: 8
+                        reorder_level:
+                          type: integer
+                          example: 15
+                        status:
+                          type: string
+                          enum: [OUT_OF_STOCK, URGENT, LOW_STOCK]
+                          example: "LOW_STOCK"
+                        severity:
+                          type: string
+                          enum: [CRITICAL, WARNING]
+                          example: "WARNING"
+                        suggested_order:
+                          type: integer
+                          example: 22
+                          description: Recommended quantity to order
+                        cost_per_unit:
+                          type: number
+                          format: float
+                          example: 22.00
+                        selling_price:
+                          type: number
+                          format: float
+                          example: 27.00
+                        estimated_reorder_cost:
+                          type: string
+                          example: "484.00"
+                          description: Cost to reorder suggested quantity
+                        last_sale:
+                          type: string
+                          format: date-time
+                          nullable: true
+                        days_until_stockout:
+                          type: integer
+                          nullable: true
+                          example: 2
+                        updated_at:
+                          type: string
+                          format: date-time
+                  summary:
+                    type: object
+                    properties:
+                      critical:
+                        type: integer
+                        example: 2
+                      warning:
+                        type: integer
+                        example: 6
+                      total_items:
+                        type: integer
+                        example: 8
+                      total_reorder_value:
+                        type: string
+                        example: "3450.00"
+                      currency:
+                        type: string
+                        example: "USD"
+                  filters_applied:
+                    type: object
+                    properties:
+                      severity:
+                        type: string
+                        example: "all"
+                      brand:
+                        type: string
+                        example: "all"
+                      sort:
+                        type: string
+                        example: "severity"
+              examples:
+                low_stock_response:
+                  summary: Low Stock Items
+                  value:
+                    success: true
+                    count: 2
+                    low_stock_items:
+                      - sku_id: "550e8400-e29b-41d4-a716-446655440000"
+                        brand: "Fortune"
+                        size: "5L"
+                        is_carton: false
+                        quantity: 0
+                        reorder_level: 15
+                        status: "OUT_OF_STOCK"
+                        severity: "CRITICAL"
+                        suggested_order: 30
+                        cost_per_unit: 22.00
+                        selling_price: 27.00
+                        estimated_reorder_cost: "660.00"
+                        last_sale: "2026-02-24T14:00:00Z"
+                        days_until_stockout: 0
+                        updated_at: "2026-02-24T15:00:00Z"
+                      - sku_id: "660e8400-e29b-41d4-a716-446655440001"
+                        brand: "Mamador"
+                        size: "5L"
+                        is_carton: false
+                        quantity: 8
+                        reorder_level: 15
+                        status: "LOW_STOCK"
+                        severity: "WARNING"
+                        suggested_order: 22
+                        cost_per_unit: 24.00
+                        selling_price: 29.00
+                        estimated_reorder_cost: "528.00"
+                        last_sale: "2026-02-24T15:30:00Z"
+                        days_until_stockout: 2
+                        updated_at: "2026-02-24T15:30:00Z"
+                    summary:
+                      critical: 1
+                      warning: 1
+                      total_items: 2
+                      total_reorder_value: "1188.00"
+                      currency: "USD"
+                    filters_applied:
+                      severity: "all"
+                      brand: "all"
+                      sort: "severity"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /inventory/sku/{sku_id}:
     get:
@@ -2551,26 +2917,342 @@ paths:
                           type: number
                           example: 945000
 
+  /sales/profit-summary:
+    get:
+      summary: Get profit analysis (revenue vs profit)
+      description: |
+        Analyze profitability by showing revenue, cost, and profit breakdown.
+        
+        **Key Metrics:**
+        - Total revenue (selling price × quantity)
+        - Total cost (cost price × quantity)
+        - Total profit (revenue - cost)
+        - Profit margin percentage
+        
+        **Features:**
+        - Breakdown by product
+        - Top profitable products
+        - Time period filtering
+        - Aligns with data science calculations
+        
+        **Use Cases:**
+        - Understand actual profitability
+        - Identify most profitable products
+        - Make pricing decisions
+        - Track profit margins over time
+      tags: [Sales]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [today, week, month]
+            default: today
+          description: Time period for profit analysis
+      responses:
+        "200":
+          description: Profit summary retrieved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  period:
+                    type: string
+                    example: "today"
+                  summary:
+                    type: object
+                    properties:
+                      total_revenue:
+                        type: string
+                        example: "3200.00"
+                        description: Total sales revenue
+                      total_cost:
+                        type: string
+                        example: "2560.00"
+                        description: Total cost of goods sold
+                      total_profit:
+                        type: string
+                        example: "640.00"
+                        description: Total profit (revenue - cost)
+                      profit_margin:
+                        type: string
+                        example: "20.00%"
+                        description: Profit margin percentage
+                      total_sales:
+                        type: integer
+                        example: 45
+                        description: Number of sales transactions
+                      total_units_sold:
+                        type: integer
+                        example: 128
+                        description: Total units sold
+                      currency:
+                        type: string
+                        example: "USD"
+                  by_product:
+                    type: array
+                    description: Profit breakdown by product
+                    items:
+                      type: object
+                      properties:
+                        brand:
+                          type: string
+                          example: "King's Oil"
+                        size:
+                          type: string
+                          example: "5L"
+                        units_sold:
+                          type: integer
+                          example: 52
+                        revenue:
+                          type: string
+                          example: "1300.00"
+                        cost:
+                          type: string
+                          example: "1040.00"
+                        profit:
+                          type: string
+                          example: "260.00"
+                        profit_margin:
+                          type: string
+                          example: "20.00%"
+                  top_profitable_products:
+                    type: array
+                    description: Products sorted by profit (highest first)
+                    items:
+                      type: object
+                      properties:
+                        brand:
+                          type: string
+                          example: "Fortune"
+                        size:
+                          type: string
+                          example: "5L"
+                        profit:
+                          type: string
+                          example: "285.00"
+                        profit_margin:
+                          type: string
+                          example: "22.50%"
+              examples:
+                today_profit:
+                  summary: Today's Profit Analysis
+                  value:
+                    success: true
+                    period: "today"
+                    summary:
+                      total_revenue: "3200.00"
+                      total_cost: "2560.00"
+                      total_profit: "640.00"
+                      profit_margin: "20.00%"
+                      total_sales: 45
+                      total_units_sold: 128
+                      currency: "USD"
+                    by_product:
+                      - brand: "King's Oil"
+                        size: "5L"
+                        units_sold: 52
+                        revenue: "1300.00"
+                        cost: "1040.00"
+                        profit: "260.00"
+                        profit_margin: "20.00%"
+                      - brand: "Fortune"
+                        size: "5L"
+                        units_sold: 38
+                        revenue: "1026.00"
+                        cost: "798.00"
+                        profit: "228.00"
+                        profit_margin: "22.22%"
+                    top_profitable_products:
+                      - brand: "King's Oil"
+                        size: "5L"
+                        profit: "260.00"
+                        profit_margin: "20.00%"
+                      - brand: "Fortune"
+                        size: "5L"
+                        profit: "228.00"
+                        profit_margin: "22.22%"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   # -------------------------
   # AUDIT / AI
   # -------------------------
+  # AI / AUDIT
+  # -------------------------
   /ai/trigger-count:
     get:
-      summary: Check if staff should be prompted for a quick count
-      tags: [Audit]
+      summary: Check if staff should be prompted for spot check
+      description: |
+        Implements data science anomaly detection algorithm from anomaly_detection_v2.py
+        
+        **Trigger Types:**
+        - **RANDOM** (Priority 2): 20% random security checks
+        - **VOLUME** (Priority 3): Sales spike detected (2× average)
+        - **TIME** (Priority 2): 4+ hours since last count
+        - **COUNTER** (Priority 1): 10+ sales since last count
+        
+        **How It Works:**
+        1. Analyzes sales velocity for all products
+        2. Checks all 4 trigger conditions
+        3. Returns highest priority trigger if any met
+        4. Provides SKU to check and UI prompt
+        
+        **Use Cases:**
+        - Staff logs a sale → Check if spot check needed
+        - Periodic background checks
+        - Real-time theft prevention
+      tags: [AI]
+      security:
+        - BearerAuth: []
       parameters:
         - name: device_id
           in: query
           required: true
           schema:
             type: string
+          description: Staff device identifier
+          example: "staff-phone-001"
       responses:
         "200":
-          description: Trigger evaluation result
+          description: Trigger decision returned
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/TriggerCountResponse"
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  should_trigger:
+                    type: boolean
+                    example: true
+                    description: Whether to prompt staff for count
+                  type:
+                    type: string
+                    enum: [RANDOM, VOLUME, TIME, COUNTER]
+                    example: "VOLUME"
+                    description: Type of trigger activated
+                  priority:
+                    type: integer
+                    example: 3
+                    description: Priority level (1-3, higher = more urgent)
+                  reason:
+                    type: string
+                    example: "Sales spike: 15 vs 5.0 avg"
+                    description: Human-readable reason for trigger
+                  sku_to_check:
+                    type: object
+                    properties:
+                      sku_id:
+                        type: string
+                        format: uuid
+                      brand:
+                        type: string
+                        example: "King's Oil"
+                      size:
+                        type: string
+                        example: "5L"
+                      current_stock:
+                        type: integer
+                        example: 120
+                  prompt:
+                    type: string
+                    example: "Quick Check: How many King's Oil 5L on shelf?"
+                    description: Message to display to staff
+                  ui_config:
+                    type: object
+                    properties:
+                      background_color:
+                        type: string
+                        example: "#D4AF37"
+                        description: Golden color for alert UI
+                      ui_locked:
+                        type: boolean
+                        example: true
+                        description: Prevent other actions until count submitted
+                      timeout_seconds:
+                        type: integer
+                        example: 60
+                        description: Time limit for staff response
+                  metadata:
+                    type: object
+                    properties:
+                      last_hour_sales:
+                        type: integer
+                        example: 15
+                      seven_day_avg:
+                        type: number
+                        example: 5.2
+                      hours_since_count:
+                        type: number
+                        example: 5.5
+                      sales_since_count:
+                        type: integer
+                        example: 12
+                      all_triggers:
+                        type: array
+                        description: All triggers that were evaluated
+                        items:
+                          type: object
+              examples:
+                trigger_volume:
+                  summary: Volume Spike Trigger
+                  value:
+                    success: true
+                    should_trigger: true
+                    type: "VOLUME"
+                    priority: 3
+                    reason: "Sales spike: 15 vs 5.0 avg"
+                    sku_to_check:
+                      sku_id: "550e8400-e29b-41d4-a716-446655440000"
+                      brand: "King's Oil"
+                      size: "5L"
+                      current_stock: 120
+                    prompt: "Quick Check: How many King's Oil 5L on shelf?"
+                    ui_config:
+                      background_color: "#D4AF37"
+                      ui_locked: true
+                      timeout_seconds: 60
+                    metadata:
+                      last_hour_sales: 15
+                      seven_day_avg: 5.2
+                      hours_since_count: 2.5
+                      sales_since_count: 8
+                no_trigger:
+                  summary: No Trigger Needed
+                  value:
+                    success: true
+                    should_trigger: false
+                    reason: "No trigger conditions met"
+                    message: "Continue with normal operations"
+                    metadata:
+                      last_hour_sales: 3
+                      seven_day_avg: 5.2
+                      hours_since_count: 1.5
+                      sales_since_count: 3
+        "400":
+          description: Missing required parameter
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /audit/verify:
     post:

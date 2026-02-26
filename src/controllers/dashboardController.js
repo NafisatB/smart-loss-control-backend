@@ -54,9 +54,12 @@ const getDashboardOverview = async (req, res) => {
 
     const todaySales = todaySalesResult.rows[0];
 
-    // Calculate today's revenue (approximate from inventory selling prices)
+    // Calculate today's revenue and profit
     const todayRevenueResult = await client.query(
-      `SELECT COALESCE(SUM(ABS(t.quantity) * i.selling_price), 0) as revenue
+      `SELECT 
+        COALESCE(SUM(ABS(t.quantity) * i.selling_price), 0) as revenue,
+        COALESCE(SUM(ABS(t.quantity) * i.cost_price), 0) as cost,
+        COALESCE(SUM(ABS(t.quantity) * (i.selling_price - i.cost_price)), 0) as profit
        FROM transactions t
        JOIN inventory i ON t.sku_id = i.sku_id AND t.shop_id = i.shop_id
        WHERE t.shop_id = $1 
@@ -67,6 +70,28 @@ const getDashboardOverview = async (req, res) => {
     );
 
     const todayRevenue = todayRevenueResult.rows[0];
+    const todayProfitMargin = parseFloat(todayRevenue.revenue) > 0 
+      ? ((parseFloat(todayRevenue.profit) / parseFloat(todayRevenue.revenue)) * 100).toFixed(2)
+      : 0;
+
+    // Calculate monthly profit
+    const monthlyProfitResult = await client.query(
+      `SELECT 
+        COALESCE(SUM(ABS(t.quantity) * i.selling_price), 0) as revenue,
+        COALESCE(SUM(ABS(t.quantity) * i.cost_price), 0) as cost,
+        COALESCE(SUM(ABS(t.quantity) * (i.selling_price - i.cost_price)), 0) as profit
+       FROM transactions t
+       JOIN inventory i ON t.sku_id = i.sku_id AND t.shop_id = i.shop_id
+       WHERE t.shop_id = $1 
+       AND t.type = 'SALE'
+       AND t.occurred_at >= CURRENT_DATE - INTERVAL '30 days'`,
+      [shop_id]
+    );
+
+    const monthlyProfit = monthlyProfitResult.rows[0];
+    const monthlyProfitMargin = parseFloat(monthlyProfit.revenue) > 0 
+      ? ((parseFloat(monthlyProfit.profit) / parseFloat(monthlyProfit.revenue)) * 100).toFixed(2)
+      : 0;
 
     // Get open alerts count
     const alertsResult = await client.query(
@@ -119,27 +144,6 @@ const getDashboardOverview = async (req, res) => {
       activeStaffCount = parseInt(staffResult.rows[0].count);
     }
 
-    // Calculate shop health score (based on deviation rate)
-    const deviationResult = await client.query(
-      `SELECT 
-        COUNT(*) as total_audits,
-        COUNT(*) FILTER (WHERE status = 'CRITICAL') as critical_count,
-        COUNT(*) FILTER (WHERE status = 'WARNING') as warning_count
-       FROM audit_logs
-       WHERE shop_id = $1 
-       AND created_at >= CURRENT_DATE - INTERVAL '7 days'`,
-      [shop_id]
-    );
-
-    const deviation = deviationResult.rows[0];
-    const totalAudits = parseInt(deviation.total_audits) || 1; // Avoid division by zero
-    const criticalCount = parseInt(deviation.critical_count) || 0;
-    const warningCount = parseInt(deviation.warning_count) || 0;
-    
-    // Health score: 100% - (critical * 10% + warning * 5%)
-    const healthScore = Math.max(0, 100 - (criticalCount * 10 + warningCount * 5));
-    const healthStatus = healthScore >= 90 ? 'SAFE' : healthScore >= 70 ? 'CAUTION' : 'CRITICAL';
-
     // Get low stock items (below reorder level)
     const lowStockResult = await client.query(
       `SELECT 
@@ -155,6 +159,24 @@ const getDashboardOverview = async (req, res) => {
        LIMIT 5`,
       [shop_id]
     );
+
+    // Simple health score: 100% - (critical * 10% + warning * 5%)
+    const deviationResult = await client.query(
+      `SELECT 
+        COUNT(*) FILTER (WHERE status = 'CRITICAL') as critical_count,
+        COUNT(*) FILTER (WHERE status = 'WARNING') as warning_count
+       FROM audit_logs
+       WHERE shop_id = $1 
+       AND created_at >= CURRENT_DATE - INTERVAL '7 days'`,
+      [shop_id]
+    );
+
+    const deviation = deviationResult.rows[0];
+    const criticalCount = parseInt(deviation.critical_count) || 0;
+    const warningCount = parseInt(deviation.warning_count) || 0;
+    
+    const healthScore = Math.max(0, 100 - (criticalCount * 10 + warningCount * 5));
+    const healthStatus = healthScore >= 90 ? 'EXCELLENT' : healthScore >= 70 ? 'GOOD' : 'FAIR';
 
     const lowStockItems = lowStockResult.rows.map(item => ({
       product: `${item.brand} ${item.size}`,
@@ -178,6 +200,10 @@ const getDashboardOverview = async (req, res) => {
         today_sales_count: parseInt(todaySales.sales_count),
         today_units_sold: parseInt(todaySales.units_sold),
         today_revenue: parseFloat(todayRevenue.revenue).toFixed(2),
+        today_profit: parseFloat(todayRevenue.profit).toFixed(2),
+        today_profit_margin: todayProfitMargin + '%',
+        monthly_profit: parseFloat(monthlyProfit.profit).toFixed(2),
+        monthly_profit_margin: monthlyProfitMargin + '%',
         open_alerts: parseInt(alerts.open_alerts),
         active_staff: activeStaffCount,
         currency: 'USD'
@@ -229,12 +255,18 @@ function getTimeAgo(timestamp) {
  * Helper: Get health message based on status
  */
 function getHealthMessage(status, alertCount) {
-  if (status === 'SAFE') {
+  if (status === 'EXCELLENT') {
     return alertCount === 0 
-      ? 'No critical alerts today' 
-      : `${alertCount} alert${alertCount > 1 ? 's' : ''} being monitored`;
-  } else if (status === 'CAUTION') {
-    return `${alertCount} alert${alertCount > 1 ? 's' : ''} need attention`;
+      ? 'Perfect! No issues detected' 
+      : `Excellent performance with ${alertCount} minor alert${alertCount > 1 ? 's' : ''}`;
+  } else if (status === 'GOOD') {
+    return alertCount === 0
+      ? 'Good performance, keep it up'
+      : `Good overall, ${alertCount} alert${alertCount > 1 ? 's' : ''} being monitored`;
+  } else if (status === 'FAIR') {
+    return `Fair performance, ${alertCount} alert${alertCount > 1 ? 's' : ''} need attention`;
+  } else if (status === 'POOR') {
+    return `Poor performance, ${alertCount} alert${alertCount > 1 ? 's' : ''} require action`;
   } else {
     return `Critical: ${alertCount} alert${alertCount > 1 ? 's' : ''} require immediate action`;
   }
@@ -242,4 +274,76 @@ function getHealthMessage(status, alertCount) {
 
 module.exports = {
   getDashboardOverview
+};
+
+
+/**
+ * Get Top Selling Products
+ * Returns top selling products for today or specified period
+ */
+const getTopSelling = async (req, res) => {
+  const client = await pool.connect();
+  
+  try {
+    const { shop_id } = req.user;
+    const { period = 'today', limit = 5 } = req.query;
+
+    let dateFilter = 'CURRENT_DATE';
+    if (period === 'week') {
+      dateFilter = "CURRENT_DATE - INTERVAL '7 days'";
+    } else if (period === 'month') {
+      dateFilter = "CURRENT_DATE - INTERVAL '30 days'";
+    }
+
+    const topSellingResult = await client.query(
+      `SELECT 
+        s.id as sku_id,
+        s.brand,
+        s.size,
+        COUNT(*) as sales_count,
+        SUM(ABS(t.quantity)) as units_sold,
+        SUM(ABS(t.quantity) * i.selling_price) as revenue
+       FROM transactions t
+       JOIN skus s ON t.sku_id = s.id
+       LEFT JOIN inventory i ON i.sku_id = s.id AND i.shop_id = t.shop_id
+       WHERE t.shop_id = $1 
+       AND t.type = 'SALE'
+       AND t.occurred_at >= ${dateFilter}
+       AND s.size = '1L'
+       GROUP BY s.id, s.brand, s.size
+       ORDER BY units_sold DESC
+       LIMIT $2`,
+      [shop_id, parseInt(limit)]
+    );
+
+    res.json({
+      success: true,
+      period,
+      count: topSellingResult.rows.length,
+      products: topSellingResult.rows.map(row => ({
+        sku_id: row.sku_id,
+        brand: row.brand,
+        size: row.size,
+        product_name: `${row.brand} ${row.size}`,
+        sales_count: parseInt(row.sales_count),
+        units_sold: parseInt(row.units_sold),
+        revenue: parseFloat(row.revenue || 0).toFixed(2)
+      }))
+    });
+
+  } catch (error) {
+    console.error('Get top selling error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch top selling products',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  } finally {
+    client.release();
+  }
+};
+
+module.exports = {
+  getDashboardOverview,
+  getTopSelling
 };

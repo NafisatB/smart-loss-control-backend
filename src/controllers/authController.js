@@ -21,11 +21,43 @@ const registerOwner = async (req, res) => {
 
     // SECURITY: Check if phone is already registered as OWNER
     const existingOwner = await client.query(
-      'SELECT u.id, u.full_name FROM users u WHERE u.phone = $1 AND u.role = $2',
+      'SELECT u.id, u.full_name, u.pin_hash FROM users u WHERE u.phone = $1 AND u.role = $2',
       [phone, 'OWNER']
     );
 
     if (existingOwner.rows.length > 0) {
+      const owner = existingOwner.rows[0];
+      
+      // If owner exists but has NO PIN, allow them to complete registration
+      if (!owner.pin_hash) {
+        console.log(`[REGISTRATION] Owner exists without PIN, allowing OTP for completion: ${phone}`);
+        
+        // Generate OTP
+        const otp = generateOTP();
+        const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes
+
+        // Store OTP (reuse existing flow)
+        await client.query(
+          `INSERT INTO otp_verifications (phone, otp_code, expires_at, full_name, shop_name)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [phone, otp, expiresAt, full_name, shop_name]
+        );
+
+        // Send OTP
+        const smsResult = await sendOTP(phone, otp);
+
+        return res.status(200).json({
+          success: true,
+          message: `OTP sent to ${phone}. Complete your registration by setting a PIN.`,
+          dev_otp: process.env.NODE_ENV === 'development' ? otp : undefined,
+          sms_status: smsResult.status,
+          sms_sid: smsResult.sid,
+          sms_error: smsResult.error,
+          registration_incomplete: true // Flag to frontend
+        });
+      }
+      
+      // Owner exists with PIN - they should login instead
       return res.status(409).json({ 
         success: false, 
         message: 'This phone number is already registered. Please use the login endpoint instead.' 
@@ -332,13 +364,17 @@ const setPIN = async (req, res) => {
   const client = await pool.connect();
 
   try {
-    const { phone, pin } = req.body;
+    // Get user from JWT token (set by authenticateJWT middleware)
+    const { id: user_id, phone, role } = req.user;
+    const { pin } = req.body;
+
+    console.log('[SET-PIN] Request from user:', { user_id, phone, role, pin: pin ? '****' : 'missing' });
 
     // Validation
-    if (!phone || !pin) {
+    if (!pin) {
       return res.status(400).json({
         success: false,
-        message: 'Phone and PIN are required'
+        message: 'PIN is required'
       });
     }
 
@@ -350,20 +386,30 @@ const setPIN = async (req, res) => {
       });
     }
 
-    // Check if user exists and is an OWNER
+    // Verify user is an OWNER
+    if (role !== 'OWNER') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only owners can set PIN through this endpoint'
+      });
+    }
+
+    // Check if user exists and get current PIN status
     const userResult = await client.query(
-      'SELECT id, shop_id, full_name, phone, role, pin_hash FROM users WHERE phone = $1 AND role = $2',
-      [phone, 'OWNER']
+      'SELECT id, shop_id, full_name, phone, role, pin_hash FROM users WHERE id = $1 AND role = $2',
+      [user_id, 'OWNER']
     );
 
     if (userResult.rows.length === 0) {
+      console.log('[SET-PIN] User not found:', user_id);
       return res.status(404).json({
         success: false,
-        message: 'Owner not found. Please register first.'
+        message: 'Owner not found.'
       });
     }
 
     const user = userResult.rows[0];
+    console.log('[SET-PIN] User found:', { id: user.id, phone: user.phone, has_pin: !!user.pin_hash });
 
     // Check if PIN is already set
     if (user.pin_hash) {
@@ -373,21 +419,10 @@ const setPIN = async (req, res) => {
       });
     }
 
-    // Verify that OTP was recently verified (within last 10 minutes)
-    const recentOTPVerification = await client.query(
-      `SELECT * FROM otp_verifications
-       WHERE phone = $1 AND is_verified = true
-       AND created_at > NOW() - INTERVAL '10 minutes'
-       ORDER BY created_at DESC LIMIT 1`,
-      [phone]
-    );
-
-    if (recentOTPVerification.rows.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'No recent OTP verification found. Please verify OTP first.'
-      });
-    }
+    // If PIN is not set, allow setting it even without recent OTP verification
+    // This handles the case where user registered, verified OTP, but didn't set PIN
+    // They can come back later and set PIN using their token
+    console.log('[SET-PIN] PIN not set yet, allowing user to set PIN');
 
     // Hash the PIN
     const saltRounds = 10;
@@ -551,13 +586,13 @@ const loginWithPIN = async (req, res) => {
   const client = await pool.connect();
   
   try {
-    const { staff_name, pin } = req.body;
+    const { phone, pin } = req.body;
 
     // Validation
-    if (!staff_name || !pin) {
+    if (!phone || !pin) {
       return res.status(400).json({ 
         success: false, 
-        message: 'Staff name and PIN are required' 
+        message: 'Phone number and PIN are required' 
       });
     }
 
@@ -569,18 +604,18 @@ const loginWithPIN = async (req, res) => {
       });
     }
 
-    // Get staff user
+    // Get staff user by phone
     const userResult = await client.query(
       `SELECT id, shop_id, full_name, phone, role, pin_hash, is_active 
        FROM users 
-       WHERE full_name = $1 AND role = $2`,
-      [staff_name, 'STAFF']
+       WHERE phone = $1 AND role = $2`,
+      [phone, 'STAFF']
     );
 
     if (userResult.rows.length === 0) {
       return res.status(401).json({ 
         success: false, 
-        message: 'Invalid staff name or PIN' 
+        message: 'Invalid phone number or PIN' 
       });
     }
 
@@ -600,7 +635,7 @@ const loginWithPIN = async (req, res) => {
     if (!pinMatch) {
       return res.status(401).json({ 
         success: false, 
-        message: 'Invalid staff name or PIN' 
+        message: 'Invalid phone number or PIN' 
       });
     }
 
@@ -609,6 +644,8 @@ const loginWithPIN = async (req, res) => {
       'UPDATE users SET last_login_at = NOW() WHERE id = $1',
       [user.id]
     );
+
+    console.log(`[SECURITY] Staff logged in: ${user.full_name}, phone: ${phone}`);
 
     // Generate JWT token
     const token = generateToken({
@@ -624,7 +661,8 @@ const loginWithPIN = async (req, res) => {
       user: {
         id: user.id,
         shop_id: user.shop_id,
-        full_name: user.full_name,
+        name: user.full_name,
+        phone: user.phone,
         role: user.role
       }
     });
@@ -641,18 +679,79 @@ const loginWithPIN = async (req, res) => {
   }
 };
 
+// Get Staff Name by Phone (for login flow)
+const getStaffByPhone = async (req, res) => {
+  const client = await pool.connect();
+  
+  try {
+    const { phone } = req.body;
+
+    // Validation
+    if (!phone) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Phone number is required' 
+      });
+    }
+
+    // Get staff user by phone
+    const userResult = await client.query(
+      `SELECT id, shop_id, full_name, phone, role, is_active 
+       FROM users 
+       WHERE phone = $1 AND role = $2`,
+      [phone, 'STAFF']
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'No staff found with this phone number' 
+      });
+    }
+
+    const user = userResult.rows[0];
+
+    // Check if active
+    if (!user.is_active) {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Account is deactivated' 
+      });
+    }
+
+    res.json({
+      success: true,
+      staff: {
+        id: user.id,
+        name: user.full_name,
+        phone: user.phone
+      }
+    });
+
+  } catch (error) {
+    console.error('Get staff by phone error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to get staff information', 
+      error: error.message 
+    });
+  } finally {
+    client.release();
+  }
+};
+
 // Staff Link (QR Code Onboarding)
 const linkStaff = async (req, res) => {
   const client = await pool.connect();
   
   try {
-    const { qr_token, device_id, staff_name, pin } = req.body;
+    const { qr_token, device_id, staff_name, phone, pin } = req.body;
 
     // Validation
-    if (!qr_token || !device_id || !staff_name || !pin) {
+    if (!qr_token || !device_id || !staff_name || !phone || !pin) {
       return res.status(400).json({ 
         success: false, 
-        message: 'All fields are required' 
+        message: 'All fields are required (QR token, device ID, name, phone, PIN)' 
       });
     }
 
@@ -682,27 +781,40 @@ const linkStaff = async (req, res) => {
     const shopId = qrCode.shop_id;
 
     // Check if staff name already exists in this shop
-    const existingStaff = await client.query(
+    const existingStaffName = await client.query(
       'SELECT id FROM users WHERE shop_id = $1 AND full_name = $2 AND role = $3',
       [shopId, staff_name, 'STAFF']
     );
 
-    if (existingStaff.rows.length > 0) {
+    if (existingStaffName.rows.length > 0) {
       return res.status(400).json({ 
         success: false, 
         message: 'Staff name already exists in this shop' 
       });
     }
 
+    // Check if phone number already exists in this shop
+    const existingStaffPhone = await client.query(
+      'SELECT id FROM users WHERE shop_id = $1 AND phone = $2 AND role = $3',
+      [shopId, phone, 'STAFF']
+    );
+
+    if (existingStaffPhone.rows.length > 0) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Phone number already registered for another staff member in this shop' 
+      });
+    }
+
     // Hash PIN
     const pinHash = await bcrypt.hash(pin, 10);
 
-    // Create staff user
+    // Create staff user with phone
     const userResult = await client.query(
-      `INSERT INTO users (shop_id, full_name, role, pin_hash) 
-       VALUES ($1, $2, $3, $4) 
-       RETURNING id, shop_id, full_name, role`,
-      [shopId, staff_name, 'STAFF', pinHash]
+      `INSERT INTO users (shop_id, full_name, phone, role, pin_hash) 
+       VALUES ($1, $2, $3, $4, $5) 
+       RETURNING id, shop_id, full_name, phone, role`,
+      [shopId, staff_name, phone, 'STAFF', pinHash]
     );
 
     const user = userResult.rows[0];
@@ -719,12 +831,25 @@ const linkStaff = async (req, res) => {
       [qrCode.id]
     );
 
+    console.log(`[SECURITY] Staff linked: ${user.full_name}, phone: ${phone}, shop_id: ${shopId}`);
+
+    // Generate JWT token
+    const token = generateToken({
+      id: user.id,
+      shop_id: user.shop_id,
+      role: user.role,
+      staff_name: user.full_name
+    });
+
     res.status(201).json({
       success: true,
       message: 'Staff device linked successfully',
+      token,
       staff: {
         id: user.id,
+        shop_id: user.shop_id,
         full_name: user.full_name,
+        phone: user.phone,
         device_id: device_id,
         role: user.role
       }
@@ -917,14 +1042,86 @@ const getSMSStatus = async (req, res) => {
   }
 };
 
+/**
+ * Validate QR Code
+ * Checks if QR code is valid and not expired
+ * Public endpoint - no authentication required
+ */
+const validateQRCode = async (req, res) => {
+  const client = await pool.connect();
+  
+  try {
+    const { qr_token } = req.body;
+
+    if (!qr_token) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'QR token is required' 
+      });
+    }
+
+    // Check if QR code exists and is valid
+    const qrResult = await client.query(
+      `SELECT * FROM qr_codes 
+       WHERE code = $1`,
+      [qr_token]
+    );
+
+    if (qrResult.rows.length === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Invalid QR code' 
+      });
+    }
+
+    const qrCode = qrResult.rows[0];
+
+    // Check if already used
+    if (qrCode.is_used) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'QR code has already been used' 
+      });
+    }
+
+    // Check if expired
+    if (new Date(qrCode.expires_at) < new Date()) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'QR code has expired. Please ask your manager for a new one.' 
+      });
+    }
+
+    // QR code is valid
+    res.json({ 
+      success: true, 
+      message: 'QR code is valid',
+      expires_at: qrCode.expires_at
+    });
+
+  } catch (error) {
+    console.error('Validate QR error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to validate QR code', 
+      error: error.message 
+    });
+  } finally {
+    client.release();
+  }
+};
+
 module.exports = {
   registerOwner,
   verifyOTP,
   setPIN,
   loginOwnerWithPIN,
+  loginOwner,
   loginWithPIN,
+  getStaffByPhone,
   linkStaff,
   generateQRCode,
+  validateQRCode,
   checkQRStatus,
   getSMSStatus
 };

@@ -83,10 +83,11 @@ const getAllSKUs = async (req, res) => {
     const query = includeInactive
       ? `SELECT id, brand, size, is_carton, units_per_carton, is_active, discontinued_at, created_at
          FROM skus
+         WHERE size = '1L'
          ORDER BY is_active DESC, brand, size, is_carton`
       : `SELECT id, brand, size, is_carton, units_per_carton, is_active, created_at
          FROM skus
-         WHERE is_active = true
+         WHERE is_active = true AND size = '1L'
          ORDER BY brand, size, is_carton`;
 
     const result = await client.query(query);
@@ -95,7 +96,7 @@ const getAllSKUs = async (req, res) => {
       success: true,
       count: result.rows.length,
       skus: result.rows,
-      note: includeInactive ? 'Showing all SKUs including discontinued' : 'Showing active SKUs only. Add ?include_inactive=true to see all'
+      note: 'Showing only 1L products. ' + (includeInactive ? 'Including discontinued items.' : 'Active items only.')
     });
 
   } catch (error) {
@@ -133,7 +134,7 @@ const getInventorySummary = async (req, res) => {
         (i.quantity * i.selling_price) as total_value
       FROM inventory i
       JOIN skus s ON i.sku_id = s.id
-      WHERE i.shop_id = $1
+      WHERE i.shop_id = $1 AND s.size = '1L'
       ORDER BY s.brand, s.size`,
       [shop_id]
     );
@@ -663,6 +664,329 @@ const reactivateSKU = async (req, res) => {
 };
 
 
+/**
+ * Update SKU Inventory Details
+ * Allows owner to update prices and reorder level for a product
+ * Security: Owner only
+ */
+const updateSKUInventory = async (req, res) => {
+  const client = await pool.connect();
+  
+  try {
+    const { shop_id, role } = req.user;
+    const { sku_id } = req.params;
+    const { cost_price, selling_price, reorder_level } = req.body;
+
+    // Security: Only owners can update inventory details
+    if (role !== 'OWNER') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only shop owners can update product details'
+      });
+    }
+
+    // Validation: At least one field must be provided
+    if (cost_price === undefined && selling_price === undefined && reorder_level === undefined) {
+      return res.status(400).json({
+        success: false,
+        message: 'At least one field must be provided: cost_price, selling_price, or reorder_level'
+      });
+    }
+
+    // Validation: Prices must be positive
+    if (cost_price !== undefined && cost_price <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cost price must be greater than 0'
+      });
+    }
+
+    if (selling_price !== undefined && selling_price <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Selling price must be greater than 0'
+      });
+    }
+
+    if (reorder_level !== undefined && reorder_level < 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Reorder level must be 0 or greater'
+      });
+    }
+
+    // Check if inventory exists for this shop and SKU
+    const inventoryCheck = await client.query(
+      `SELECT i.id, i.cost_price, i.selling_price, i.reorder_level, i.quantity,
+              s.brand, s.size, s.is_carton
+       FROM inventory i
+       JOIN skus s ON i.sku_id = s.id
+       WHERE i.shop_id = $1 AND i.sku_id = $2`,
+      [shop_id, sku_id]
+    );
+
+    if (inventoryCheck.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found in your inventory'
+      });
+    }
+
+    const currentInventory = inventoryCheck.rows[0];
+
+    // Build update query dynamically
+    const updates = [];
+    const values = [];
+    let paramCount = 0;
+
+    if (cost_price !== undefined) {
+      paramCount++;
+      updates.push(`cost_price = $${paramCount}`);
+      values.push(cost_price);
+    }
+
+    if (selling_price !== undefined) {
+      paramCount++;
+      updates.push(`selling_price = $${paramCount}`);
+      values.push(selling_price);
+    }
+
+    if (reorder_level !== undefined) {
+      paramCount++;
+      updates.push(`reorder_level = $${paramCount}`);
+      values.push(reorder_level);
+    }
+
+    // Add updated_at
+    updates.push(`updated_at = NOW()`);
+
+    // Add WHERE clause parameters
+    paramCount++;
+    values.push(shop_id);
+    const shopIdParam = paramCount;
+
+    paramCount++;
+    values.push(sku_id);
+    const skuIdParam = paramCount;
+
+    // Execute update
+    const updateQuery = `
+      UPDATE inventory
+      SET ${updates.join(', ')}
+      WHERE shop_id = $${shopIdParam} AND sku_id = $${skuIdParam}
+      RETURNING id, sku_id, quantity, cost_price, selling_price, reorder_level, updated_at
+    `;
+
+    const result = await client.query(updateQuery, values);
+    const updatedInventory = result.rows[0];
+
+    // Calculate profit margin
+    const profitMargin = ((updatedInventory.selling_price - updatedInventory.cost_price) / updatedInventory.selling_price * 100).toFixed(2);
+
+    console.log(`[INVENTORY] Product updated: ${currentInventory.brand} ${currentInventory.size} by shop ${shop_id}`);
+
+    res.json({
+      success: true,
+      message: `Product updated: ${currentInventory.brand} ${currentInventory.size}`,
+      product: {
+        sku_id: updatedInventory.sku_id,
+        brand: currentInventory.brand,
+        size: currentInventory.size,
+        is_carton: currentInventory.is_carton,
+        quantity: parseInt(updatedInventory.quantity),
+        cost_price: parseFloat(updatedInventory.cost_price),
+        selling_price: parseFloat(updatedInventory.selling_price),
+        reorder_level: parseInt(updatedInventory.reorder_level),
+        profit_margin: parseFloat(profitMargin),
+        updated_at: updatedInventory.updated_at
+      },
+      changes: {
+        cost_price: cost_price !== undefined ? {
+          old: parseFloat(currentInventory.cost_price),
+          new: parseFloat(updatedInventory.cost_price)
+        } : null,
+        selling_price: selling_price !== undefined ? {
+          old: parseFloat(currentInventory.selling_price),
+          new: parseFloat(updatedInventory.selling_price)
+        } : null,
+        reorder_level: reorder_level !== undefined ? {
+          old: parseInt(currentInventory.reorder_level),
+          new: parseInt(updatedInventory.reorder_level)
+        } : null
+      }
+    });
+
+  } catch (error) {
+    console.error('Update SKU inventory error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update product',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * Get Low Stock Items
+ * Returns products that are at or below reorder level
+ * Security: Owner and Staff can view
+ */
+const getLowStock = async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    const { shop_id } = req.user;
+    const { severity, brand, sort = 'severity' } = req.query;
+
+    // Base query
+    let query = `
+      SELECT
+        i.sku_id,
+        s.brand,
+        s.size,
+        s.is_carton,
+        i.quantity,
+        i.reorder_level,
+        i.cost_price,
+        i.selling_price,
+        i.updated_at,
+        (
+          SELECT MAX(t.occurred_at)
+          FROM transactions t
+          WHERE t.shop_id = i.shop_id
+          AND t.sku_id = i.sku_id
+          AND t.type = 'SALE'
+        ) as last_sale
+      FROM inventory i
+      JOIN skus s ON i.sku_id = s.id
+      WHERE i.shop_id = $1
+      AND s.is_active = true
+      AND i.quantity <= i.reorder_level
+    `;
+
+    const params = [shop_id];
+    let paramCount = 1;
+
+    // Filter by brand if provided
+    if (brand) {
+      paramCount++;
+      query += ` AND s.brand ILIKE $${paramCount}`;
+      params.push(`%${brand}%`);
+    }
+
+    // Add ordering
+    switch (sort) {
+      case 'quantity':
+        query += ' ORDER BY i.quantity ASC, s.brand, s.size';
+        break;
+      case 'brand':
+        query += ' ORDER BY s.brand, s.size, i.quantity ASC';
+        break;
+      case 'severity':
+      default:
+        query += ' ORDER BY (CASE WHEN i.quantity = 0 THEN 0 WHEN i.quantity < (i.reorder_level * 0.5) THEN 1 ELSE 2 END), i.quantity ASC';
+        break;
+    }
+
+    const result = await client.query(query, params);
+
+    // Process results and add severity levels
+    const lowStockItems = result.rows.map(item => {
+      const quantity = parseInt(item.quantity);
+      const reorderLevel = parseInt(item.reorder_level);
+
+      // Determine severity
+      let status, severity_level;
+      if (quantity === 0) {
+        status = 'OUT_OF_STOCK';
+        severity_level = 'CRITICAL';
+      } else if (quantity < reorderLevel * 0.5) {
+        status = 'URGENT';
+        severity_level = 'CRITICAL';
+      } else {
+        status = 'LOW_STOCK';
+        severity_level = 'WARNING';
+      }
+
+      // Calculate suggested order quantity (reorder to 2x reorder level)
+      const suggestedOrder = Math.max(reorderLevel * 2 - quantity, reorderLevel);
+
+      // Estimate days until stockout (simple calculation based on recent sales)
+      let daysUntilStockout = null;
+      if (item.last_sale && quantity > 0) {
+        // This is a simplified calculation - in production, use sales velocity
+        daysUntilStockout = Math.floor(quantity / 5); // Assume 5 units/day average
+      } else if (quantity === 0) {
+        daysUntilStockout = 0;
+      }
+
+      return {
+        sku_id: item.sku_id,
+        brand: item.brand,
+        size: item.size,
+        is_carton: item.is_carton,
+        quantity,
+        reorder_level: reorderLevel,
+        status,
+        severity: severity_level,
+        suggested_order: suggestedOrder,
+        cost_per_unit: parseFloat(item.cost_price),
+        selling_price: parseFloat(item.selling_price),
+        estimated_reorder_cost: (suggestedOrder * parseFloat(item.cost_price)).toFixed(2),
+        last_sale: item.last_sale,
+        days_until_stockout: daysUntilStockout,
+        updated_at: item.updated_at
+      };
+    });
+
+    // Filter by severity if requested
+    let filteredItems = lowStockItems;
+    if (severity) {
+      const severityUpper = severity.toUpperCase();
+      if (severityUpper === 'CRITICAL') {
+        filteredItems = lowStockItems.filter(item => item.severity === 'CRITICAL');
+      } else if (severityUpper === 'WARNING') {
+        filteredItems = lowStockItems.filter(item => item.severity === 'WARNING');
+      }
+    }
+
+    // Calculate summary
+    const summary = {
+      critical: lowStockItems.filter(item => item.severity === 'CRITICAL').length,
+      warning: lowStockItems.filter(item => item.severity === 'WARNING').length,
+      total_items: filteredItems.length,
+      total_reorder_value: filteredItems.reduce((sum, item) =>
+        sum + parseFloat(item.estimated_reorder_cost), 0
+      ).toFixed(2),
+      currency: 'USD'
+    };
+
+    res.json({
+      success: true,
+      count: filteredItems.length,
+      low_stock_items: filteredItems,
+      summary,
+      filters_applied: {
+        severity: severity || 'all',
+        brand: brand || 'all',
+        sort
+      }
+    });
+
+  } catch (error) {
+    console.error('Get low stock error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch low stock items',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  } finally {
+    client.release();
+  }
+};
+
 module.exports = {
   createSKU,
   getAllSKUs,
@@ -671,5 +995,7 @@ module.exports = {
   recordRestock,
   recordDecant,
   deleteSKU,
-  reactivateSKU
+  reactivateSKU,
+  updateSKUInventory,
+  getLowStock
 };

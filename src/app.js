@@ -10,6 +10,10 @@ const inventoryRoutes = require("./routes/inventoryRoutes");
 const salesRoutes = require("./routes/salesRoutes");
 const shopRoutes = require("./routes/shopRoutes");
 const dashboardRoutes = require("./routes/dashboardRoutes");
+const aiRoutes = require("./routes/aiRoutes");
+const alertsRoutes = require("./routes/alertsRoutes");
+const auditRoutes = require("./routes/auditRoutes");
+const reportsRoutes = require("./routes/reportsRoutes");
 
 const app = express();
 
@@ -40,6 +44,10 @@ app.use("/inventory", inventoryRoutes);
 app.use("/sales", salesRoutes);
 app.use("/shops", shopRoutes);
 app.use("/dashboard", dashboardRoutes);
+app.use("/ai", aiRoutes);
+app.use("/alerts", alertsRoutes);
+app.use("/audit", auditRoutes);
+app.use("/reports", reportsRoutes);
 
 // Swagger docs
 app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));

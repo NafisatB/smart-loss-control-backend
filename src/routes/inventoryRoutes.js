@@ -8,7 +8,9 @@ const {
   recordRestock,
   recordDecant,
   deleteSKU,
-  reactivateSKU
+  reactivateSKU,
+  updateSKUInventory,
+  getLowStock
 } = require('../controllers/inventoryController');
 const { authenticateJWT, requireOwner } = require('../middleware/auth');
 
@@ -18,11 +20,15 @@ router.use(authenticateJWT);
 // SKU Management
 router.post('/skus', createSKU);
 router.get('/skus', getAllSKUs);
+router.patch('/skus/:sku_id', requireOwner, updateSKUInventory);
 router.delete('/skus/:sku_id', requireOwner, deleteSKU);
 router.patch('/skus/:sku_id/reactivate', requireOwner, reactivateSKU);
 
 // Get inventory summary for current shop
 router.get('/summary', getInventorySummary);
+
+// Get low stock items (products at or below reorder level)
+router.get('/low-stock', getLowStock);
 
 // Get specific SKU inventory details
 router.get('/sku/:sku_id', getInventoryBySKU);
