@@ -141,6 +141,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS trg_create_alert ON audit_logs;
 CREATE TRIGGER trg_create_alert
 AFTER INSERT ON audit_logs
 FOR EACH ROW

@@ -89,6 +89,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS trg_inventory_updated_at ON inventory;
 CREATE TRIGGER trg_inventory_updated_at
 BEFORE UPDATE ON inventory
 FOR EACH ROW
@@ -157,6 +158,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS trg_audit_severity ON audit_logs;
 CREATE TRIGGER trg_audit_severity
 BEFORE INSERT ON audit_logs
 FOR EACH ROW EXECUTE FUNCTION check_audit_severity();
@@ -189,6 +191,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS trg_create_alert ON audit_logs;
 CREATE TRIGGER trg_create_alert
 AFTER INSERT ON audit_logs
 FOR EACH ROW

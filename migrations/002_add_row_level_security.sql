@@ -22,36 +22,43 @@ ALTER TABLE sales_velocity_metrics ENABLE ROW LEVEL SECURITY;
 -- ============================================
 
 -- Inventory: Users can only see their shop's inventory
+DROP POLICY IF EXISTS tenant_isolation_inventory ON inventory;
 CREATE POLICY tenant_isolation_inventory ON inventory
     FOR ALL
     USING (shop_id = current_setting('app.current_shop_id', true)::uuid);
 
 -- Transactions: Users can only see their shop's transactions
+DROP POLICY IF EXISTS tenant_isolation_transactions ON transactions;
 CREATE POLICY tenant_isolation_transactions ON transactions
     FOR ALL
     USING (shop_id = current_setting('app.current_shop_id', true)::uuid);
 
 -- Audit Logs: Users can only see their shop's audit logs
+DROP POLICY IF EXISTS tenant_isolation_audit_logs ON audit_logs;
 CREATE POLICY tenant_isolation_audit_logs ON audit_logs
     FOR ALL
     USING (shop_id = current_setting('app.current_shop_id', true)::uuid);
 
 -- Alerts: Users can only see their shop's alerts
+DROP POLICY IF EXISTS tenant_isolation_alerts ON alerts;
 CREATE POLICY tenant_isolation_alerts ON alerts
     FOR ALL
     USING (shop_id = current_setting('app.current_shop_id', true)::uuid);
 
 -- Restocks: Users can only see their shop's restocks
+DROP POLICY IF EXISTS tenant_isolation_restocks ON restocks;
 CREATE POLICY tenant_isolation_restocks ON restocks
     FOR ALL
     USING (shop_id = current_setting('app.current_shop_id', true)::uuid);
 
 -- Decants: Users can only see their shop's decants
+DROP POLICY IF EXISTS tenant_isolation_decants ON decants;
 CREATE POLICY tenant_isolation_decants ON decants
     FOR ALL
     USING (shop_id = current_setting('app.current_shop_id', true)::uuid);
 
 -- Sales Velocity Metrics: Users can only see their shop's metrics
+DROP POLICY IF EXISTS tenant_isolation_velocity ON sales_velocity_metrics;
 CREATE POLICY tenant_isolation_velocity ON sales_velocity_metrics
     FOR ALL
     USING (shop_id = current_setting('app.current_shop_id', true)::uuid);

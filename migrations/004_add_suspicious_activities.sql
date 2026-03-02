@@ -30,6 +30,7 @@ CREATE INDEX IF NOT EXISTS idx_suspicious_activities_reviewed ON suspicious_acti
 ALTER TABLE suspicious_activities ENABLE ROW LEVEL SECURITY;
 
 -- Policy: Users can only see suspicious activities for their shop
+DROP POLICY IF EXISTS suspicious_activities_tenant_isolation ON suspicious_activities;
 CREATE POLICY suspicious_activities_tenant_isolation ON suspicious_activities
   FOR ALL
   USING (shop_id = current_setting('app.current_shop_id', TRUE)::UUID);

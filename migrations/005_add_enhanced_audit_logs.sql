@@ -36,6 +36,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_logs_enhanced_shop_category_date
 ALTER TABLE audit_logs_enhanced ENABLE ROW LEVEL SECURITY;
 
 -- Policy: Users can only see audit logs for their shop
+DROP POLICY IF EXISTS audit_logs_enhanced_tenant_isolation ON audit_logs_enhanced;
 CREATE POLICY audit_logs_enhanced_tenant_isolation ON audit_logs_enhanced
   FOR ALL
   USING (shop_id = current_setting('app.current_shop_id', TRUE)::UUID);
