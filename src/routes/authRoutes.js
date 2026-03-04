@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+
 const {
   registerOwner,
   verifyOTP,
@@ -12,8 +13,11 @@ const {
   generateQRCode,
   validateQRCode,
   checkQRStatus,
-  getSMSStatus
+  getSMSStatus,
+  verifyOwnerPhone,     // <-- NEW
+  resetOwnerPin         // <-- NEW
 } = require('../controllers/authController');
+
 const { authenticateJWT, requireOwner } = require('../middleware/auth');
 
 // Owner Registration (NEW OWNERS - Step 1: Send OTP)
@@ -28,25 +32,37 @@ router.post('/verify-otp', verifyOTP);
 // Owner Set PIN (Step 3: Set PIN after OTP verification - requires JWT token)
 router.post('/set-pin', authenticateJWT, setPIN);
 
-// Owner PIN Login (Daily login with phone + PIN, no OTP needed)
+// Owner PIN Login (Daily login with phone + PIN)
 router.post('/login-owner-pin', loginOwnerWithPIN);
 
-// Generate QR Code for Staff Onboarding (Owner only)
+// -----------------------------------
+// ⭐ ADDED ROUTES FOR CREATE NEW PIN
+// -----------------------------------
+
+// Step 1 — Check if owner exists by phone
+router.post('/verify-owner-phone', verifyOwnerPhone);
+
+// Step 2 — Reset PIN directly (Create New PIN screen)
+router.post('/reset-owner-pin', resetOwnerPin);
+
+// -----------------------------------
+
+// Generate QR Code (Owner only)
 router.post('/generate-qr', authenticateJWT, requireOwner, generateQRCode);
 
-// Validate QR Code (Public endpoint - checks if QR is valid and not expired)
+// Validate QR Code (Public)
 router.post('/validate-qr', validateQRCode);
 
-// Check QR Code Status (Public endpoint for countdown)
+// Check QR Code Status (Public)
 router.get('/qr-status/:qr_token', checkQRStatus);
 
-// SMS Service Status (Development endpoint)
+// SMS Service Status
 router.get('/sms-status', getSMSStatus);
 
-// Get Staff by Phone (for login flow - Step 1)
+// Staff Get by Phone
 router.post('/staff/get-by-phone', getStaffByPhone);
 
-// Staff PIN Login (Step 2)
+// Staff Login (PIN)
 router.post('/login-pin', loginWithPIN);
 
 // Staff Link (QR Code Onboarding)

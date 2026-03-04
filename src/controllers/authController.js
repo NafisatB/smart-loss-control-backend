@@ -49,7 +49,7 @@ const registerOwner = async (req, res) => {
         return res.status(200).json({
           success: true,
           message: `OTP sent to ${phone}. Complete your registration by setting a PIN.`,
-          dev_otp: process.env.NODE_ENV === 'development' ? otp : undefined,
+          // dev_otp: process.env.NODE_ENV === 'development' ? otp : undefined,
           sms_status: smsResult.status,
           sms_sid: smsResult.sid,
           sms_error: smsResult.error,
@@ -202,9 +202,9 @@ const loginOwner = async (req, res) => {
     };
 
     // Include OTP in development mode or if SMS failed
-    if (process.env.NODE_ENV === 'development' || !smsResult.success) {
-      response.dev_otp = otp;
-    }
+    // if (process.env.NODE_ENV === 'development' || !smsResult.success) {
+    //   response.dev_otp = otp;
+    // }
 
     // Include SMS details for debugging
     if (smsResult.mode === 'production') {
@@ -580,6 +580,141 @@ const loginOwnerWithPIN = async (req, res) => {
     client.release();
   }
 };
+
+// Owner create new pin if forgotten the old one 
+
+const verifyOwnerPhone = async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    const { phone } = req.body;
+
+    if (!phone) {
+      return res.status(400).json({
+        success: false,
+        message: "Phone number is required"
+      });
+    }
+
+    const result = await client.query(
+      `SELECT u.full_name, s.shop_name 
+       FROM users u
+       JOIN shops s ON u.shop_id = s.id
+       WHERE u.phone = $1 AND u.role = 'OWNER'`,
+      [phone]
+    );
+
+    if (result.rows.length === 0) {
+      return res.json({
+        success: true,
+        exists: false
+      });
+    }
+
+    const owner = result.rows[0];
+
+    return res.json({
+      success: true,
+      exists: true,
+      full_name: owner.full_name,
+      shop_name: owner.shop_name
+    });
+
+  } catch (error) {
+    console.error("verifyOwnerPhone error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to verify phone",
+      error: error.message
+    });
+  } finally {
+    client.release();
+  }
+};
+
+
+
+// Reset the owner pin
+
+const resetOwnerPin = async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    const { phone, new_pin } = req.body;
+
+    if (!phone || !new_pin) {
+      return res.status(400).json({
+        success: false,
+        message: "Phone and new PIN are required"
+      });
+    }
+
+    if (!/^\d{4}$/.test(new_pin)) {
+      return res.status(400).json({
+        success: false,
+        message: "PIN must be exactly 4 digits"
+      });
+    }
+
+    const userResult = await client.query(
+      `SELECT u.id, u.full_name, u.shop_id, u.role, s.shop_name 
+       FROM users u
+       JOIN shops s ON u.shop_id = s.id
+       WHERE u.phone = $1 AND u.role = 'OWNER'`,
+      [phone]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Owner not found"
+      });
+    }
+
+    const user = userResult.rows[0];
+
+    const pinHash = await bcrypt.hash(new_pin, 10);
+
+    await client.query(
+      "UPDATE users SET pin_hash = $1 WHERE phone = $2 AND role = 'OWNER'",
+      [pinHash, phone]
+    );
+
+    // Create new token to log in automatically
+    const token = generateToken({
+      id: user.id,
+      shop_id: user.shop_id,
+      role: user.role,
+      phone: phone
+    });
+
+    return res.json({
+      success: true,
+      message: "PIN reset successfully",
+
+      token,
+      user: {
+        id: user.id,
+        full_name: user.full_name,
+        phone: phone,
+        role: user.role,
+        shop_id: user.shop_id,
+        shop_name: user.shop_name
+      }
+    });
+
+  } catch (error) {
+    console.error("resetOwnerPin error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to reset PIN",
+      error: error.message
+    });
+  } finally {
+    client.release();
+  }
+};
+
 
 // Staff PIN Login
 const loginWithPIN = async (req, res) => {
@@ -1118,6 +1253,8 @@ module.exports = {
   loginOwnerWithPIN,
   loginOwner,
   loginWithPIN,
+  verifyOwnerPhone,   
+  resetOwnerPin,
   getStaffByPhone,
   linkStaff,
   generateQRCode,
