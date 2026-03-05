@@ -42,7 +42,7 @@ CREATE POLICY audit_logs_enhanced_tenant_isolation ON audit_logs_enhanced
   USING (shop_id = current_setting('app.current_shop_id', TRUE)::UUID);
 
 -- Grant permissions
-GRANT SELECT, INSERT ON audit_logs_enhanced TO authenticated_user;
+-- GRANT SELECT, INSERT ON audit_logs_enhanced TO authenticated_user;
 
 -- Add comments
 COMMENT ON TABLE audit_logs_enhanced IS 'Comprehensive audit logging for all system events';
@@ -66,7 +66,7 @@ WHERE al.category = 'AUTHENTICATION'
   AND al.success = FALSE
 ORDER BY al.created_at DESC;
 
-GRANT SELECT ON failed_auth_attempts TO authenticated_user;
+-- GRANT SELECT ON failed_auth_attempts TO authenticated_user;
 
 -- View: Security events
 CREATE OR REPLACE VIEW security_events AS
@@ -81,7 +81,7 @@ LEFT JOIN shops s ON al.shop_id = s.id
 WHERE al.category = 'SECURITY'
 ORDER BY al.created_at DESC;
 
-GRANT SELECT ON security_events TO authenticated_user;
+-- GRANT SELECT ON security_events TO authenticated_user;
 
 -- View: Critical events (last 24 hours)
 CREATE OR REPLACE VIEW recent_critical_events AS
@@ -97,7 +97,7 @@ WHERE al.level = 'CRITICAL'
   AND al.created_at >= NOW() - INTERVAL '24 hours'
 ORDER BY al.created_at DESC;
 
-GRANT SELECT ON recent_critical_events TO authenticated_user;
+-- GRANT SELECT ON recent_critical_events TO authenticated_user;
 
 -- View: Data modification audit trail
 CREATE OR REPLACE VIEW data_modification_trail AS
@@ -110,7 +110,7 @@ LEFT JOIN users u ON al.user_id = u.id
 WHERE al.category = 'DATA_MODIFICATION'
 ORDER BY al.created_at DESC;
 
-GRANT SELECT ON data_modification_trail TO authenticated_user;
+-- GRANT SELECT ON data_modification_trail TO authenticated_user;
 
 -- Create function to get audit summary
 CREATE OR REPLACE FUNCTION get_audit_summary(
@@ -142,7 +142,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
-GRANT EXECUTE ON FUNCTION get_audit_summary TO authenticated_user;
+-- GRANT EXECUTE ON FUNCTION get_audit_summary TO authenticated_user;
 
 -- Success message
 DO $$
