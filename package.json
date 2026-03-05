@@ -3,12 +3,13 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "dev": "nodemon src/server.js",
-    "start": "node src/server.js",
-    "migrate": "node scripts/run-migration.js",
-    "db:reset": "node scripts/reset-db.js",
-    "seed:inventory": "node scripts/seed-inventory.js"
-  },
+  "dev": "nodemon src/server.js",
+  "start": "node src/server.js",
+  "start:prod": "node scripts/run-migration.js && node scripts/seed-inventory.js && node src/server.js",
+  "migrate": "node scripts/run-migration.js",
+  "db:reset": "node scripts/reset-db.js",
+  "seed:inventory": "node scripts/seed-inventory.js"
+},
   "keywords": [],
   "author": "",
   "license": "ISC",
