@@ -8,7 +8,9 @@ async function seed() {
   try {
     console.log('🔄 Seeding shops, SKUs, inventory, and alerts...');
 
+    // ----------------------
     // 1️⃣ Shops
+    // ----------------------
     const shops = [
       { name: 'Owner Shop', owner_phone: '+254700000001' },
       { name: 'Staff Shop', owner_phone: '+254700000002' },
@@ -31,7 +33,9 @@ async function seed() {
       }
     }
 
+    // ----------------------
     // 2️⃣ SKUs
+    // ----------------------
     const skus = [
       { brand: 'BrandA', size: '1L' },
       { brand: 'BrandB', size: '500ml' },
@@ -55,8 +59,13 @@ async function seed() {
       }
     }
 
-    // 3️⃣ Inventory
+    // ----------------------
+    // 3️⃣ Inventory (RLS compliant)
+    // ----------------------
     for (const shop of shops) {
+      // set session variable so RLS allows inserts
+      await client.query(`SET app.current_shop_id = '${shop.id}'`);
+
       for (const sku of skus) {
         const exists = await client.query(
           'SELECT id FROM inventory WHERE shop_id = $1 AND sku_id = $2',
@@ -66,7 +75,7 @@ async function seed() {
         if (exists.rows.length === 0) {
           await client.query(
             `INSERT INTO inventory 
-             (shop_id, sku_id, quantity, cost_price, selling_price, updated_at) 
+             (shop_id, sku_id, quantity, cost_price, selling_price, updated_at)
              VALUES ($1, $2, $3, $4, $5, NOW())`,
             [shop.id, sku.id, 50, 100, 150]
           );
@@ -74,8 +83,12 @@ async function seed() {
       }
     }
 
-    // 4️⃣ Alerts
+    // ----------------------
+    // 4️⃣ Alerts (RLS compliant)
+    // ----------------------
     for (const shop of shops) {
+      await client.query(`SET app.current_shop_id = '${shop.id}'`);
+
       for (const sku of skus) {
         const exists = await client.query(
           'SELECT id FROM alerts WHERE shop_id = $1 AND sku_id = $2 AND is_resolved = false',
@@ -94,18 +107,19 @@ async function seed() {
           await client.query(
             `INSERT INTO alerts 
              (id, shop_id, sku_id, audit_log_id, deviation, estimated_loss, is_resolved, created_at, severity, type, metadata)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
             [
               alertId,
               shop.id,
               sku.id,
-              null,                     // audit_log_id
-              metadata.variance,        // deviation
-              metadata.variance * 2,    // estimated_loss (numeric)
-              false,                    // is_resolved
-              new Date(),               // created_at
-              'CRITICAL',               // severity
-              'STOCK_ALERT',            // type
+              null, // audit_log_id
+              metadata.variance, // deviation
+              metadata.variance * 2, // estimated_loss
+              false, // is_resolved
+              new Date(), // created_at
+              'CRITICAL', // severity
+              'STOCK_ALERT', // type
+              metadata, // metadata JSON
             ]
           );
         }
@@ -115,6 +129,7 @@ async function seed() {
     console.log('✅ Seeding completed successfully!');
   } catch (error) {
     console.error('❌ Seeding error:', error.message);
+    console.error(error);
   } finally {
     client.release();
     process.exit();
