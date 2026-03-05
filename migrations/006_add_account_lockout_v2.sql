@@ -1,8 +1,18 @@
--- Migration: Add Account Lockout Tables
--- Purpose: Track failed login attempts and lock accounts after multiple failures
+-- ============================================
+-- Migration 006: Account Lockout Tables
+-- Purpose: Track failed login attempts and account locks
 -- Date: February 2026
+-- ============================================
 
--- Create failed_login_attempts table
+-- 1️⃣ Ensure role exists
+DO $$
+BEGIN
+   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'authenticated_user') THEN
+       CREATE ROLE authenticated_user;
+   END IF;
+END $$;
+
+-- 2️⃣ Create failed_login_attempts table
 CREATE TABLE IF NOT EXISTS failed_login_attempts (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID REFERENCES users(id) ON DELETE CASCADE,
@@ -13,7 +23,7 @@ CREATE TABLE IF NOT EXISTS failed_login_attempts (
   created_at TIMESTAMP DEFAULT NOW()
 );
 
--- Create account_locks table
+-- 3️⃣ Create account_locks table
 CREATE TABLE IF NOT EXISTS account_locks (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -26,7 +36,7 @@ CREATE TABLE IF NOT EXISTS account_locks (
   created_at TIMESTAMP DEFAULT NOW()
 );
 
--- Create indexes for performance
+-- 4️⃣ Indexes
 CREATE INDEX IF NOT EXISTS idx_failed_attempts_user_id ON failed_login_attempts(user_id);
 CREATE INDEX IF NOT EXISTS idx_failed_attempts_phone ON failed_login_attempts(phone);
 CREATE INDEX IF NOT EXISTS idx_failed_attempts_time ON failed_login_attempts(attempt_time DESC);
@@ -34,13 +44,13 @@ CREATE INDEX IF NOT EXISTS idx_account_locks_user_id ON account_locks(user_id);
 CREATE INDEX IF NOT EXISTS idx_account_locks_active ON account_locks(locked_until) WHERE unlocked_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_account_locks_token ON account_locks(unlock_token) WHERE unlock_token IS NOT NULL;
 
--- Add comments
+-- 5️⃣ Comments
 COMMENT ON TABLE failed_login_attempts IS 'Tracks all failed login attempts for security monitoring';
 COMMENT ON TABLE account_locks IS 'Tracks account lockouts due to security violations';
 COMMENT ON COLUMN account_locks.unlock_token IS 'Token sent to user for manual unlock';
 COMMENT ON COLUMN account_locks.locked_until IS 'Automatic unlock time';
 
--- Create function to check if account is locked
+-- 6️⃣ Functions
 CREATE OR REPLACE FUNCTION is_account_locked(p_user_id UUID)
 RETURNS TABLE (
   is_locked BOOLEAN,
@@ -50,26 +60,24 @@ RETURNS TABLE (
 ) AS $$
 BEGIN
   RETURN QUERY
-  SELECT 
-    TRUE as is_locked,
-    al.locked_until,
-    CEIL(EXTRACT(EPOCH FROM (al.locked_until - NOW())) / 60)::INTEGER as minutes_remaining,
-    al.reason
-  FROM account_locks al
-  WHERE al.user_id = p_user_id
-    AND al.locked_until > NOW()
-    AND al.unlocked_at IS NULL
-  ORDER BY al.locked_at DESC
-  LIMIT 1;
-  
-  -- If no active lock found, return not locked
+    SELECT 
+      TRUE as is_locked,
+      al.locked_until,
+      CEIL(EXTRACT(EPOCH FROM (al.locked_until - NOW())) / 60)::INTEGER as minutes_remaining,
+      al.reason
+    FROM account_locks al
+    WHERE al.user_id = p_user_id
+      AND al.locked_until > NOW()
+      AND al.unlocked_at IS NULL
+    ORDER BY al.locked_at DESC
+    LIMIT 1;
+
   IF NOT FOUND THEN
     RETURN QUERY SELECT FALSE, NULL::TIMESTAMP, 0, NULL::VARCHAR(100);
   END IF;
 END;
 $$ LANGUAGE plpgsql;
 
--- Create function to count recent failed attempts
 CREATE OR REPLACE FUNCTION count_recent_failed_attempts(
   p_user_id UUID,
   p_minutes INTEGER DEFAULT 15
@@ -87,7 +95,6 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Create function to lock account
 CREATE OR REPLACE FUNCTION lock_account(
   p_user_id UUID,
   p_reason VARCHAR(100),
@@ -98,28 +105,19 @@ DECLARE
   v_lock_id UUID;
   v_unlock_token VARCHAR(64);
 BEGIN
-  -- Generate unlock token
   v_unlock_token := encode(gen_random_bytes(32), 'hex');
-  
-  -- Create lock record
+
   INSERT INTO account_locks (
-    user_id,
-    locked_until,
-    reason,
-    unlock_token
+    user_id, locked_until, reason, unlock_token
   ) VALUES (
-    p_user_id,
-    NOW() + (p_duration_minutes || ' minutes')::INTERVAL,
-    p_reason,
-    v_unlock_token
+    p_user_id, NOW() + (p_duration_minutes || ' minutes')::INTERVAL, p_reason, v_unlock_token
   )
   RETURNING id INTO v_lock_id;
-  
+
   RETURN v_lock_id;
 END;
 $$ LANGUAGE plpgsql;
 
--- Create function to unlock account
 CREATE OR REPLACE FUNCTION unlock_account(
   p_user_id UUID,
   p_unlocked_by UUID DEFAULT NULL
@@ -129,20 +127,18 @@ DECLARE
   rows_updated INTEGER;
 BEGIN
   UPDATE account_locks
-  SET 
-    unlocked_at = NOW(),
-    unlocked_by = p_unlocked_by
+  SET unlocked_at = NOW(), unlocked_by = p_unlocked_by
   WHERE user_id = p_user_id
     AND locked_until > NOW()
     AND unlocked_at IS NULL;
-  
+
   GET DIAGNOSTICS rows_updated = ROW_COUNT;
-  
+
   RETURN rows_updated > 0;
 END;
 $$ LANGUAGE plpgsql;
 
--- Create view for active locks
+-- 7️⃣ Views
 CREATE OR REPLACE VIEW active_account_locks AS
 SELECT 
   al.*,
@@ -156,7 +152,6 @@ WHERE al.locked_until > NOW()
   AND al.unlocked_at IS NULL
 ORDER BY al.locked_at DESC;
 
--- Create view for failed attempt summary
 CREATE OR REPLACE VIEW failed_attempts_summary AS
 SELECT 
   u.id as user_id,
@@ -173,7 +168,22 @@ GROUP BY u.id, u.full_name, u.phone
 HAVING COUNT(*) >= 3
 ORDER BY total_attempts DESC;
 
--- Success message
+-- 8️⃣ Grants (safe, only if role exists)
+DO $$
+BEGIN
+  IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'authenticated_user') THEN
+    GRANT SELECT, INSERT ON failed_login_attempts TO authenticated_user;
+    GRANT SELECT, INSERT, UPDATE ON account_locks TO authenticated_user;
+    GRANT EXECUTE ON FUNCTION is_account_locked TO authenticated_user;
+    GRANT EXECUTE ON FUNCTION count_recent_failed_attempts TO authenticated_user;
+    GRANT EXECUTE ON FUNCTION lock_account TO authenticated_user;
+    GRANT EXECUTE ON FUNCTION unlock_account TO authenticated_user;
+    GRANT SELECT ON active_account_locks TO authenticated_user;
+    GRANT SELECT ON failed_attempts_summary TO authenticated_user;
+  END IF;
+END $$;
+
+-- 9️⃣ Success notice
 DO $$
 BEGIN
   RAISE NOTICE 'Migration 006: Account lockout tables and functions created successfully';
