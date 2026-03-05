@@ -36,7 +36,7 @@ CREATE POLICY suspicious_activities_tenant_isolation ON suspicious_activities
   USING (shop_id = current_setting('app.current_shop_id', TRUE)::UUID);
 
 -- Grant permissions
-GRANT SELECT, INSERT, UPDATE ON suspicious_activities TO authenticated_user;
+-- GRANT SELECT, INSERT, UPDATE ON suspicious_activities TO authenticated_user;
 
 -- Add comments
 COMMENT ON TABLE suspicious_activities IS 'Tracks detected anomaly patterns for theft detection';
@@ -58,7 +58,7 @@ LEFT JOIN shops sh ON sa.shop_id = sh.id
 WHERE sa.reviewed = FALSE
 ORDER BY sa.detected_at DESC;
 
-GRANT SELECT ON unreviewed_suspicious_activities TO authenticated_user;
+-- GRANT SELECT ON unreviewed_suspicious_activities TO authenticated_user;
 
 -- Success message
 DO $$
