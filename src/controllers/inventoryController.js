@@ -220,17 +220,10 @@ const getInventoryBySKU = async (req, res) => {
 // Record Restock (Supplier Delivery)
 const recordRestock = async (req, res) => {
   const client = await pool.connect();
-  
+
   try {
     const { shop_id, id: user_id } = req.user;
-    const { 
-      sku_id, 
-      ordered_qty, 
-      received_qty, 
-      cost_price, 
-      selling_price,
-      supplier_name
-    } = req.body;
+    const { sku_id, ordered_qty, received_qty, cost_price, selling_price, supplier_name } = req.body;
 
     // Validation
     if (!sku_id || !ordered_qty || !received_qty || !cost_price || !selling_price) {
@@ -240,7 +233,6 @@ const recordRestock = async (req, res) => {
       });
     }
 
-    // Validate supplier_name if provided
     if (supplier_name && supplier_name.length > 150) {
       return res.status(400).json({
         success: false,
@@ -248,48 +240,51 @@ const recordRestock = async (req, res) => {
       });
     }
 
+    // Set RLS context for this shop
+    await client.query('SELECT set_current_shop($1)', [shop_id]);
+
     // Start transaction
     await client.query('BEGIN');
 
     // Calculate discrepancy
     const discrepancy = received_qty - ordered_qty;
 
-    // Record restock in restocks table
+    // Insert into restocks table
     const restockResult = await client.query(
       `INSERT INTO restocks 
         (shop_id, sku_id, ordered_qty, received_qty, cost_price, selling_price, user_id, supplier_name)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-      RETURNING id, created_at`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id, created_at`,
       [shop_id, sku_id, ordered_qty, received_qty, cost_price, selling_price, user_id, supplier_name || null]
     );
 
-    // Update or insert inventory
+    // Update inventory
     const inventoryResult = await client.query(
       `INSERT INTO inventory (shop_id, sku_id, quantity, cost_price, selling_price)
-      VALUES ($1, $2, $3, $4, $5)
-      ON CONFLICT (shop_id, sku_id) 
-      DO UPDATE SET 
-        quantity = inventory.quantity + $3,
-        cost_price = $4,
-        selling_price = $5,
-        updated_at = NOW()
-      RETURNING quantity`,
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (shop_id, sku_id)
+       DO UPDATE SET 
+         quantity = inventory.quantity + $3,
+         cost_price = $4,
+         selling_price = $5,
+         updated_at = NOW()
+       RETURNING quantity`,
       [shop_id, sku_id, received_qty, cost_price, selling_price]
     );
 
-    // Create transaction record
+    // Record transaction
     await client.query(
-      `INSERT INTO transactions 
+      `INSERT INTO transactions
         (shop_id, sku_id, type, quantity, user_id, occurred_at, device_id, meta)
-      VALUES ($1, $2, $3, $4, $5, NOW(), $6, $7)`,
+       VALUES ($1, $2, $3, $4, $5, NOW(), $6, $7)`,
       [
-        shop_id, 
-        sku_id, 
-        'RESTOCK', 
-        received_qty, 
-        user_id, 
+        shop_id,
+        sku_id,
+        'RESTOCK',
+        received_qty,
+        user_id,
         'web-dashboard',
-        JSON.stringify({ 
+        JSON.stringify({
           restock_id: restockResult.rows[0].id,
           cost_price,
           selling_price,
@@ -319,10 +314,10 @@ const recordRestock = async (req, res) => {
   } catch (error) {
     await client.query('ROLLBACK');
     console.error('Record restock error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to record restock', 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to record restock',
+      error: error.message
     });
   } finally {
     client.release();
@@ -332,17 +327,11 @@ const recordRestock = async (req, res) => {
 // Record Decant (Carton to Bottles)
 const recordDecant = async (req, res) => {
   const client = await pool.connect();
-  
+
   try {
     const { shop_id, id: user_id } = req.user;
-    const { 
-      from_sku_id,  // Carton SKU
-      to_sku_id,    // Bottle SKU
-      cartons,
-      units_per_carton = 12  // Default: 1 carton = 12 bottles
-    } = req.body;
+    const { from_sku_id, to_sku_id, cartons, units_per_carton = 12 } = req.body;
 
-    // Validation
     if (!from_sku_id || !to_sku_id || !cartons) {
       return res.status(400).json({
         success: false,
@@ -357,10 +346,12 @@ const recordDecant = async (req, res) => {
       });
     }
 
-    // Start transaction
+    // Set RLS context for this shop
+    await client.query('SELECT set_current_shop($1)', [shop_id]);
+
     await client.query('BEGIN');
 
-    // Check if enough cartons available
+    // Check carton inventory
     const cartonInventory = await client.query(
       'SELECT quantity FROM inventory WHERE shop_id = $1 AND sku_id = $2',
       [shop_id, from_sku_id]
@@ -378,76 +369,68 @@ const recordDecant = async (req, res) => {
 
     const units_to_add = cartons * units_per_carton;
 
-    // Record decant
+    // Insert into decants table
     const decantResult = await client.query(
       `INSERT INTO decants 
         (shop_id, carton_sku_id, unit_sku_id, cartons_used, units_created, user_id)
-      VALUES ($1, $2, $3, $4, $5, $6)
-      RETURNING id, created_at`,
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id, created_at`,
       [shop_id, from_sku_id, to_sku_id, cartons, units_to_add, user_id]
     );
 
     // Deduct cartons
     await client.query(
-      `UPDATE inventory 
-      SET quantity = quantity - $1, updated_at = NOW()
-      WHERE shop_id = $2 AND sku_id = $3`,
+      `UPDATE inventory
+       SET quantity = quantity - $1, updated_at = NOW()
+       WHERE shop_id = $2 AND sku_id = $3`,
       [cartons, shop_id, from_sku_id]
     );
 
     // Add bottles
     const bottleResult = await client.query(
       `INSERT INTO inventory (shop_id, sku_id, quantity)
-      VALUES ($1, $2, $3)
-      ON CONFLICT (shop_id, sku_id) 
-      DO UPDATE SET 
-        quantity = inventory.quantity + $3,
-        updated_at = NOW()
-      RETURNING quantity`,
+       VALUES ($1, $2, $3)
+       ON CONFLICT (shop_id, sku_id)
+       DO UPDATE SET 
+         quantity = inventory.quantity + $3,
+         updated_at = NOW()
+       RETURNING quantity`,
       [shop_id, to_sku_id, units_to_add]
     );
 
-    // Create transaction records for decant
-    await client.query(
-      `INSERT INTO transactions 
-        (shop_id, sku_id, type, quantity, user_id, occurred_at, device_id, meta)
-      VALUES 
-        ($1, $2, 'DECANT', $3, $4, NOW(), $5, $6)`,
-      [
-        shop_id, 
-        from_sku_id, 
-        -cartons, 
-        user_id, 
-        'web-dashboard',
-        JSON.stringify({ 
-          decant_id: decantResult.rows[0].id,
-          from_sku_id,
-          to_sku_id,
-          cartons_removed: cartons,
-          units_added: units_to_add
-        })
-      ]
-    );
-    
-    await client.query(
-      `INSERT INTO transactions 
-        (shop_id, sku_id, type, quantity, user_id, occurred_at, device_id, meta)
-      VALUES ($1, $2, 'DECANT', $3, $4, NOW(), $5, $6)`,
-      [
-        shop_id, 
-        to_sku_id, 
-        units_to_add, 
-        user_id, 
-        'web-dashboard',
-        JSON.stringify({ 
-          decant_id: decantResult.rows[0].id,
-          from_sku_id,
-          to_sku_id,
-          cartons_removed: cartons,
-          units_added: units_to_add
-        })
-      ]
-    );
+    // Transactions
+    const transactions = [
+      {
+        sku_id: from_sku_id,
+        quantity: -cartons
+      },
+      {
+        sku_id: to_sku_id,
+        quantity: units_to_add
+      }
+    ];
+
+    for (const t of transactions) {
+      await client.query(
+        `INSERT INTO transactions
+          (shop_id, sku_id, type, quantity, user_id, occurred_at, device_id, meta)
+         VALUES ($1, $2, 'DECANT', $3, $4, NOW(), $5, $6)`,
+        [
+          shop_id,
+          t.sku_id,
+          t.quantity,
+          user_id,
+          'web-dashboard',
+          JSON.stringify({
+            decant_id: decantResult.rows[0].id,
+            from_sku_id,
+            to_sku_id,
+            cartons_removed: cartons,
+            units_added: units_to_add
+          })
+        ]
+      );
+    }
 
     await client.query('COMMIT');
 
@@ -466,10 +449,10 @@ const recordDecant = async (req, res) => {
   } catch (error) {
     await client.query('ROLLBACK');
     console.error('Record decant error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to record decant', 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to record decant',
+      error: error.message
     });
   } finally {
     client.release();
