@@ -1,440 +1,201 @@
-// controllers/authController.js
-
-const bcrypt = require('bcrypt');
-const crypto = require('crypto');
+// src/controllers/authController.js
+require('dotenv').config();
 const { pool } = require('../config/db');
-const { getDeviceInfo } = require('../utils/device');
-const { generateToken, generateOTP } = require('../utils/jwt');
-const { sendOTP, getServiceStatus } = require('../services/smsService');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
+const { v4: uuidv4 } = require('uuid');
 
-// -----------------------------
-// OWNER REGISTRATION & LOGIN
-// -----------------------------
+// Helper to generate JWT
+const generateToken = (user) => {
+  return jwt.sign(
+    { user_id: user.id, phone: user.phone, role: user.role },
+    process.env.JWT_SECRET,
+    { expiresIn: '7d' }
+  );
+};
 
-// Owner Registration (Step 1: Send OTP)
-const registerOwner = async (req, res) => {
-  const client = await pool.connect();
+// Helper to hash PIN
+const hashPIN = async (pin) => {
+  const salt = await bcrypt.genSalt(10);
+  return await bcrypt.hash(pin, salt);
+};
+
+// ====================== OWNER ======================
+
+// Send OTP for owner registration/login
+const sendOwnerOTP = async (req, res) => {
   try {
-    const { full_name, shop_name, phone } = req.body;
+    const { phone } = req.body;
 
-    if (!phone || !full_name || !shop_name) {
-      return res.status(400).json({ success: false, message: 'Phone number, full name, and shop name are required' });
-    }
-
-    // Check if owner exists
-    const existingOwner = await client.query(
-      'SELECT u.id, u.full_name, u.pin_hash FROM users u WHERE u.phone = $1 AND u.role = $2',
-      [phone, 'OWNER']
+    // Check if phone already exists
+    const existing = await pool.query(
+      'SELECT * FROM users WHERE phone = $1 OR phone = $2',
+      [phone, phone]
     );
 
-    if (existingOwner.rows.length > 0) {
-      const owner = existingOwner.rows[0];
-      if (!owner.pin_hash) {
-        const otp = generateOTP();
-        const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
-        await client.query(
-          `INSERT INTO otp_verifications (phone, otp_code, expires_at, full_name, shop_name)
-           VALUES ($1, $2, $3, $4, $5)`,
-          [phone, otp, expiresAt, full_name, shop_name]
-        );
-        const smsResult = await sendOTP(phone, otp);
-        return res.status(200).json({
-          success: true,
-          message: `OTP sent to ${phone}. Complete your registration by setting a PIN.`,
-          sms_status: smsResult.status,
-          sms_sid: smsResult.sid,
-          sms_error: smsResult.error,
-          registration_incomplete: true
-        });
-      }
-      return res.status(409).json({ success: false, message: 'Phone already registered. Use login instead.' });
+    if (existing.rows.length > 0) {
+      return res.status(409).json({ message: 'Phone already registered' });
     }
 
-    const otp = generateOTP();
-    const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
-    await client.query(
-      'INSERT INTO otp_verifications (phone, otp_code, expires_at, full_name, shop_name) VALUES ($1, $2, $3, $4, $5)',
-      [phone, otp, expiresAt, full_name, shop_name]
+    // Generate OTP
+    const otp = Math.floor(1000 + Math.random() * 9000);
+
+    // Store OTP in DB
+    await pool.query(
+      'INSERT INTO otp_verifications (phone, otp, verified, created_at) VALUES ($1, $2, $3, NOW())',
+      [phone, otp, false]
     );
 
-    const smsResult = await sendOTP(phone, otp);
-    res.status(201).json({
-      success: true,
-      message: `Registration successful! OTP sent to ${phone}`,
-      sms_status: smsResult.mode,
-      sms_sid: smsResult.sid,
-      sms_error: smsResult.error
-    });
+    // TODO: integrate SMS API here
+    console.log(`OTP for ${phone}: ${otp}`);
 
-  } catch (error) {
-    console.error('registerOwner error:', error);
-    res.status(500).json({ success: false, message: 'Registration failed', error: error.message });
-  } finally {
-    client.release();
+    res.json({ message: 'OTP sent successfully', phone });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Server error' });
   }
 };
 
-// Owner OTP Verification (Step 2: Verify and Login)
-const verifyOTP = async (req, res) => {
-  const client = await pool.connect();
+// Verify Owner OTP
+const verifyOwnerOTP = async (req, res) => {
   try {
-    const { phone, otp } = req.body;
-    if (!phone || !otp) return res.status(400).json({ success: false, message: 'Phone and OTP required' });
+    const { phone, otp, full_name, shop_name } = req.body;
 
-    const otpResult = await client.query(
-      `SELECT * FROM otp_verifications 
-       WHERE phone = $1 AND otp_code = $2 AND is_verified = false AND expires_at > NOW()
-       ORDER BY created_at DESC LIMIT 1`,
-      [phone, otp]
+    // Check OTP
+    const otpEntry = await pool.query(
+      'SELECT * FROM otp_verifications WHERE phone = $1 ORDER BY created_at DESC LIMIT 1',
+      [phone]
     );
 
-    if (otpResult.rows.length === 0) return res.status(400).json({ success: false, message: 'Invalid or expired OTP' });
-    const otpRecord = otpResult.rows[0];
-
-    await client.query('UPDATE otp_verifications SET is_verified = true WHERE id = $1', [otpRecord.id]);
-
-    let userResult = await client.query('SELECT * FROM users WHERE phone = $1 AND role = $2', [phone, 'OWNER']);
-    let user;
-
-    if (userResult.rows.length === 0) {
-      // Create shop and user
-      const shopResult = await client.query(
-        'INSERT INTO shops (shop_name, owner_phone) VALUES ($1, $2) RETURNING id',
-        [otpRecord.shop_name, phone]
-      );
-      const shopId = shopResult.rows[0].id;
-
-      const newUserResult = await client.query(
-        'INSERT INTO users (shop_id, full_name, phone, role) VALUES ($1, $2, $3, $4) RETURNING *',
-        [shopId, otpRecord.full_name, phone, 'OWNER']
-      );
-      user = newUserResult.rows[0];
-    } else {
-      user = userResult.rows[0];
+    if (!otpEntry.rows.length || otpEntry.rows[0].verified) {
+      return res.status(400).json({ message: 'Invalid OTP' });
     }
 
-    // 🔹 Device tracking
-    const deviceInfo = getDeviceInfo(req);
-    await client.query(
-      `UPDATE users
-       SET last_login_at = NOW(),
-           last_login_device = $1,
-           last_logout_at = NULL
-       WHERE id = $2`,
-      [deviceInfo, user.id]
+    if (otpEntry.rows[0].otp !== otp) {
+      return res.status(400).json({ message: 'OTP mismatch' });
+    }
+
+    // Mark OTP as verified
+    await pool.query(
+      'UPDATE otp_verifications SET verified = true WHERE id = $1',
+      [otpEntry.rows[0].id]
     );
 
-    const token = generateToken({
-      id: user.id,
-      shop_id: user.shop_id,
-      role: user.role,
-      phone: user.phone
-    });
+    // Create owner and shop if new
+    const owner = await pool.query(
+      'INSERT INTO users (id, full_name, phone, role, created_at) VALUES ($1, $2, $3, $4, NOW()) RETURNING *',
+      [uuidv4(), full_name, phone, 'owner']
+    );
+
+    const shop = await pool.query(
+      'INSERT INTO shops (id, owner_id, shop_name, created_at) VALUES ($1, $2, $3, NOW()) RETURNING *',
+      [uuidv4(), owner.rows[0].id, shop_name]
+    );
 
     res.json({
-      success: true,
-      token,
-      user: {
-        id: user.id,
-        shop_id: user.shop_id,
-        full_name: user.full_name,
-        phone: user.phone,
-        role: user.role,
-        last_login_device: deviceInfo
-      }
+      message: 'Owner registered successfully',
+      owner: owner.rows[0],
+      shop: shop.rows[0]
     });
-
-  } catch (error) {
-    console.error('verifyOTP error:', error);
-    res.status(500).json({ success: false, message: 'OTP verification failed', error: error.message });
-  } finally {
-    client.release();
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Server error' });
   }
 };
 
-// Set PIN (Step 3)
-const setPIN = async (req, res) => {
-  const client = await pool.connect();
+// Set Owner PIN
+const setOwnerPIN = async (req, res) => {
   try {
-    const { id: user_id, phone, role } = req.user;
-    const { pin } = req.body;
+    const { phone, pin } = req.body;
+    if (!/^\d{4}$/.test(pin)) {
+      return res.status(400).json({ message: 'PIN must be 4 digits' });
+    }
 
-    if (!pin || !/^\d{4}$/.test(pin)) return res.status(400).json({ success: false, message: 'PIN must be 4 digits' });
-    if (role !== 'OWNER') return res.status(403).json({ success: false, message: 'Only owners can set PIN' });
+    const hashed = await hashPIN(pin);
 
-    const userResult = await client.query('SELECT * FROM users WHERE id = $1 AND role = $2', [user_id, 'OWNER']);
-    if (userResult.rows.length === 0) return res.status(404).json({ success: false, message: 'Owner not found' });
-
-    const existingUser = userResult.rows[0];
-    if (existingUser.pin_hash) return res.status(400).json({ success: false, message: 'PIN already set' });
-
-    const pinHash = await bcrypt.hash(pin, 10);
-    await client.query('UPDATE users SET pin_hash = $1 WHERE id = $2', [pinHash, user_id]);
-
-    // 🔹 Device tracking
-    const deviceInfo = getDeviceInfo(req);
-    await client.query(
-      `UPDATE users
-       SET last_login_at = NOW(),
-           last_login_device = $1,
-           last_logout_at = NULL
-       WHERE id = $2`,
-      [deviceInfo, user_id]
+    const owner = await pool.query(
+      'UPDATE users SET pin = $1, last_login_device = $2 WHERE phone = $3 RETURNING *',
+      [hashed, req.headers['user-agent'], phone]
     );
 
-    const token = generateToken({
-      id: existingUser.id,
-      shop_id: existingUser.shop_id,
-      role: existingUser.role,
-      phone: existingUser.phone
-    });
-
-    res.json({
-      success: true,
-      message: 'PIN set successfully',
-      token,
-      user: {
-        id: existingUser.id,
-        shop_id: existingUser.shop_id,
-        full_name: existingUser.full_name,
-        phone: existingUser.phone,
-        role: existingUser.role,
-        last_login_device: deviceInfo
-      }
-    });
-
-  } catch (error) {
-    console.error('setPIN error:', error);
-    res.status(500).json({ success: false, message: 'Failed to set PIN', error: error.message });
-  } finally {
-    client.release();
+    res.json({ message: 'PIN set successfully', owner: owner.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Server error' });
   }
 };
 
 // Owner login with PIN
-const loginOwnerWithPIN = async (req, res) => {
-  const client = await pool.connect();
+const ownerLogin = async (req, res) => {
   try {
     const { phone, pin } = req.body;
-    if (!phone || !pin || !/^\d{4}$/.test(pin)) return res.status(400).json({ success: false, message: 'Phone and 4-digit PIN required' });
 
-    const userResult = await client.query('SELECT * FROM users WHERE phone = $1 AND role = $2', [phone, 'OWNER']);
-    if (userResult.rows.length === 0) return res.status(401).json({ success: false, message: 'Invalid phone or PIN' });
-
-    const user = userResult.rows[0];
-    if (!user.pin_hash) return res.status(400).json({ success: false, message: 'PIN not set' });
-
-    const pinMatch = await bcrypt.compare(pin, user.pin_hash);
-    if (!pinMatch) return res.status(401).json({ success: false, message: 'Invalid phone or PIN' });
-
-    // 🔹 Device tracking
-    const deviceInfo = getDeviceInfo(req);
-    await client.query(
-      `UPDATE users
-       SET last_login_at = NOW(),
-           last_login_device = $1,
-           last_logout_at = NULL
-       WHERE id = $2`,
-      [deviceInfo, user.id]
+    const ownerRes = await pool.query(
+      'SELECT * FROM users WHERE phone = $1 AND role = $2',
+      [phone, 'owner']
     );
 
-    const token = generateToken({ id: user.id, shop_id: user.shop_id, role: user.role, phone: user.phone });
+    const owner = ownerRes.rows[0];
 
-    res.json({
-      success: true,
-      token,
-      user: {
-        id: user.id,
-        shop_id: user.shop_id,
-        full_name: user.full_name,
-        phone: user.phone,
-        role: user.role,
-        last_login_device: deviceInfo
-      }
-    });
+    if (!owner || !owner.pin) {
+      return res.status(401).json({ message: 'PIN not set or invalid' });
+    }
 
-  } catch (error) {
-    console.error('loginOwnerWithPIN error:', error);
-    res.status(500).json({ success: false, message: 'Login failed', error: error.message });
-  } finally {
-    client.release();
+    const match = await bcrypt.compare(pin, owner.pin);
+    if (!match) return res.status(401).json({ message: 'Incorrect PIN' });
+
+    // Update last device
+    await pool.query(
+      'UPDATE users SET last_login_device = $1 WHERE id = $2',
+      [req.headers['user-agent'], owner.id]
+    );
+
+    const token = generateToken(owner);
+
+    res.json({ message: 'Login successful', token, owner });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Server error' });
   }
 };
 
-// Reset Owner PIN
-const resetOwnerPin = async (req, res) => {
-  const client = await pool.connect();
-  try {
-    const { phone, new_pin } = req.body;
-    if (!phone || !new_pin || !/^\d{4}$/.test(new_pin)) return res.status(400).json({ success: false, message: 'Phone and 4-digit PIN required' });
-
-    const userResult = await client.query(
-      `SELECT u.* FROM users u WHERE u.phone = $1 AND u.role = 'OWNER'`,
-      [phone]
-    );
-
-    if (userResult.rows.length === 0) return res.status(404).json({ success: false, message: 'Owner not found' });
-
-    const user = userResult.rows[0];
-    const pinHash = await bcrypt.hash(new_pin, 10);
-    await client.query('UPDATE users SET pin_hash = $1 WHERE id = $2', [pinHash, user.id]);
-
-    // 🔹 Device tracking
-    const deviceInfo = getDeviceInfo(req);
-    await client.query(
-      `UPDATE users
-       SET last_login_at = NOW(),
-           last_login_device = $1,
-           last_logout_at = NULL
-       WHERE id = $2`,
-      [deviceInfo, user.id]
-    );
-
-    const token = generateToken({ id: user.id, shop_id: user.shop_id, role: user.role, phone: user.phone });
-
-    res.json({
-      success: true,
-      message: 'PIN reset successfully',
-      token,
-      user: {
-        id: user.id,
-        shop_id: user.shop_id,
-        full_name: user.full_name,
-        phone: user.phone,
-        role: user.role,
-        last_login_device: deviceInfo
-      }
-    });
-
-  } catch (error) {
-    console.error('resetOwnerPin error:', error);
-    res.status(500).json({ success: false, message: 'Failed to reset PIN', error: error.message });
-  } finally {
-    client.release();
-  }
-};
-
-// -----------------------------
-// STAFF LOGIN & LINKING
-// -----------------------------
+// ====================== STAFF ======================
 
 // Staff login with PIN
-const loginWithPIN = async (req, res) => {
-  const client = await pool.connect();
+const staffLogin = async (req, res) => {
   try {
     const { phone, pin } = req.body;
-    if (!phone || !pin || !/^\d{4}$/.test(pin)) return res.status(400).json({ success: false, message: 'Phone and 4-digit PIN required' });
 
-    const userResult = await client.query('SELECT * FROM users WHERE phone = $1 AND role = $2', [phone, 'STAFF']);
-    if (userResult.rows.length === 0) return res.status(401).json({ success: false, message: 'Invalid phone or PIN' });
-
-    const user = userResult.rows[0];
-    const pinMatch = await bcrypt.compare(pin, user.pin_hash);
-    if (!pinMatch) return res.status(401).json({ success: false, message: 'Invalid phone or PIN' });
-
-    // 🔹 Device tracking
-    const deviceInfo = getDeviceInfo(req);
-    await client.query(
-      `UPDATE users
-       SET last_login_at = NOW(),
-           last_login_device = $1,
-           last_logout_at = NULL
-       WHERE id = $2`,
-      [deviceInfo, user.id]
+    const staffRes = await pool.query(
+      'SELECT * FROM users WHERE phone = $1 AND role = $2 AND is_active = true',
+      [phone, 'staff']
     );
 
-    const token = generateToken({ id: user.id, shop_id: user.shop_id, role: user.role, staff_name: user.full_name });
+    const staff = staffRes.rows[0];
+    if (!staff || !staff.pin) return res.status(401).json({ message: 'Invalid PIN' });
 
-    res.json({
-      success: true,
-      token,
-      user: {
-        id: user.id,
-        shop_id: user.shop_id,
-        name: user.full_name,
-        phone: user.phone,
-        role: user.role,
-        last_login_device: deviceInfo
-      }
-    });
+    const match = await bcrypt.compare(pin, staff.pin);
+    if (!match) return res.status(401).json({ message: 'Incorrect PIN' });
 
-  } catch (error) {
-    console.error('loginWithPIN error:', error);
-    res.status(500).json({ success: false, message: 'Login failed', error: error.message });
-  } finally {
-    client.release();
+    await pool.query(
+      'UPDATE users SET last_login_device = $1 WHERE id = $2',
+      [req.headers['user-agent'], staff.id]
+    );
+
+    const token = generateToken(staff);
+
+    res.json({ message: 'Staff login successful', token, staff });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Server error' });
   }
 };
 
-// Staff link via QR onboarding
-const linkStaff = async (req, res) => {
-  const client = await pool.connect();
-  try {
-    const { qr_token, device_id, staff_name, phone, pin } = req.body;
-    if (!qr_token || !device_id || !staff_name || !phone || !pin) return res.status(400).json({ success: false, message: 'All fields required' });
-
-    const qrResult = await client.query('SELECT * FROM qr_codes WHERE code = $1 AND is_used = false AND expires_at > NOW()', [qr_token]);
-    if (qrResult.rows.length === 0) return res.status(400).json({ success: false, message: 'Invalid or expired QR code' });
-
-    const qrCode = qrResult.rows[0];
-    const shopId = qrCode.shop_id;
-
-    const pinHash = await bcrypt.hash(pin, 10);
-    const userResult = await client.query(
-      `INSERT INTO users (shop_id, full_name, phone, role, pin_hash) 
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [shopId, staff_name, phone, 'STAFF', pinHash]
-    );
-    const user = userResult.rows[0];
-
-    await client.query('INSERT INTO devices (user_id, device_id) VALUES ($1, $2)', [user.id, device_id]);
-    await client.query('UPDATE qr_codes SET is_used = true WHERE id = $1', [qrCode.id]);
-
-    // 🔹 Device tracking
-    const deviceInfo = getDeviceInfo(req);
-    await client.query(
-      `UPDATE users
-       SET last_login_at = NOW(),
-           last_login_device = $1,
-           last_logout_at = NULL
-       WHERE id = $2`,
-      [deviceInfo, user.id]
-    );
-
-    const token = generateToken({ id: user.id, shop_id: user.shop_id, role: user.role, staff_name: user.full_name });
-
-    res.status(201).json({
-      success: true,
-      message: 'Staff device linked successfully',
-      token,
-      staff: {
-        id: user.id,
-        shop_id: user.shop_id,
-        full_name: user.full_name,
-        phone: user.phone,
-        device_id,
-        role: user.role,
-        last_login_device: deviceInfo
-      }
-    });
-
-  } catch (error) {
-    console.error('linkStaff error:', error);
-    res.status(500).json({ success: false, message: 'Staff linking failed', error: error.message });
-  } finally {
-    client.release();
-  }
-};
-
-// -----------------------------
-// EXPORTS
-// -----------------------------
+// Export all controller functions
 module.exports = {
-  registerOwner,
-  verifyOTP,
-  setPIN,
-  loginOwnerWithPIN,
-  loginWithPIN,
-  resetOwnerPin,
-  linkStaff
+  sendOwnerOTP,
+  verifyOwnerOTP,
+  setOwnerPIN,
+  ownerLogin,
+  staffLogin
 };
