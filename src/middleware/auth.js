@@ -55,6 +55,13 @@ const requireStaff = (req, res, next) => {
   next();
 };
 
+const client = await pool.connect()
+
+await client.query(
+  'SELECT set_config($1, $2, false)',
+  ['app.current_shop_id', req.user.shop_id]
+)
+
 module.exports = { 
   authenticateJWT, 
   requireOwner, 

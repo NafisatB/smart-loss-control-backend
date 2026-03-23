@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+
 const {
   createSKU,
   getAllSKUs,
@@ -12,10 +13,13 @@ const {
   updateSKUInventory,
   getLowStock
 } = require('../controllers/inventoryController');
-const { authenticateJWT, requireOwner } = require('../middleware/auth');
 
-// All inventory routes require authentication
+const { authenticateJWT, requireOwner } = require('../middleware/auth');
+const { attachDBWithRLS } = require('../middleware/db'); // ✅ IMPORT THIS
+
+// ✅ ORDER IS CRITICAL
 router.use(authenticateJWT);
+router.use(attachDBWithRLS); // ✅ ADD THIS LINE
 
 // SKU Management
 router.post('/skus', createSKU);
@@ -27,7 +31,7 @@ router.patch('/skus/:sku_id/reactivate', requireOwner, reactivateSKU);
 // Get inventory summary for current shop
 router.get('/summary', getInventorySummary);
 
-// Get low stock items (products at or below reorder level)
+// Get low stock items
 router.get('/low-stock', getLowStock);
 
 // Get specific SKU inventory details
@@ -36,7 +40,7 @@ router.get('/sku/:sku_id', getInventoryBySKU);
 // Record supplier restock
 router.post('/restock', recordRestock);
 
-// Record carton to bottle decant
+// Record decant
 router.post('/decant', recordDecant);
 
 module.exports = router;
