@@ -14,6 +14,9 @@ const aiRoutes = require("./routes/aiRoutes");
 const alertsRoutes = require("./routes/alertsRoutes");
 const auditRoutes = require("./routes/auditRoutes");
 const reportsRoutes = require("./routes/reportsRoutes");
+const staffRoutes = require('./routes/staffRoutes')
+const staffRoutes = require('./routes/staffRoutes')
+
 
 const app = express();
 
@@ -48,6 +51,7 @@ app.use("/ai", aiRoutes);
 app.use("/alerts", alertsRoutes);
 app.use("/audit", auditRoutes);
 app.use("/reports", reportsRoutes);
+app.use('/api', staffRoutes);
 
 // Swagger docs
 app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
