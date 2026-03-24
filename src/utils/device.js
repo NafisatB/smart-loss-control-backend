@@ -1,6 +1,6 @@
 // utils/device.js
 
-exports.getDeviceInfo = (req) => {
+const getDeviceInfo = (req) => {
   const ua = req.headers['user-agent'] || '';
 
   if (/android/i.test(ua)) return 'Android Device';
@@ -10,4 +10,8 @@ exports.getDeviceInfo = (req) => {
   if (/linux/i.test(ua)) return 'Linux PC';
 
   return 'Unknown Device';
+};
+
+module.exports = {
+  getDeviceInfo
 };

@@ -34,7 +34,7 @@ COMMENT ON COLUMN alerts.resolved_at IS 'Timestamp when the alert was resolved';
 -- Add last login device info
 ALTER TABLE users
 ADD COLUMN IF NOT EXISTS last_login_device TEXT;
-
+ADD COLUMN is_online BOOLEAN DEFAULT false;
 COMMENT ON COLUMN users.last_login_device IS 'Device info string captured at last login';
 
 -- Add last logout timestamp (with timezone)
