@@ -15,7 +15,8 @@ const {
   checkQRStatus,
   getSMSStatus,
   verifyOwnerPhone,     // <-- NEW
-  resetOwnerPin         // <-- NEW
+  resetOwnerPin ,
+  logoutUser        // <-- NEW
 } = require('../controllers/authController');
 
 const { authenticateJWT, requireOwner } = require('../middleware/auth');
@@ -31,6 +32,8 @@ router.post('/verify-otp', verifyOTP);
 
 // Owner Set PIN (Step 3: Set PIN after OTP verification - requires JWT token)
 router.post('/set-pin', authenticateJWT, setPIN);
+router.post('/logout', authenticateJWT, logoutUser);
+
 
 // Owner PIN Login (Daily login with phone + PIN)
 router.post('/login-owner-pin', loginOwnerWithPIN);

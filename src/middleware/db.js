@@ -6,7 +6,6 @@ const attachDBWithRLS = async (req, res, next) => {
   try {
     await client.query('BEGIN');
 
-    // 🔥 CRITICAL: Set shop_id for RLS
     await client.query(
       'SELECT set_config($1, $2, true)',
       ['app.current_shop_id', req.user.shop_id]
@@ -19,8 +18,9 @@ const attachDBWithRLS = async (req, res, next) => {
     client.release();
     next(err);
   }
-
-  module.exports = { 
-  attachDBWithRLS
 };
+
+// ✅ EXPORT MUST BE OUTSIDE
+module.exports = {
+  attachDBWithRLS
 };

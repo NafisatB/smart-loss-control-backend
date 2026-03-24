@@ -1,69 +1,77 @@
 const jwt = require('jsonwebtoken');
+const { pool } = require('../config/db');
 
 // Verify JWT token
-const authenticateJWT = (req, res, next) => {
+const authenticateJWT = async (req, res, next) => {
   const authHeader = req.headers.authorization;
 
   if (!authHeader) {
-    return res.status(401).json({ 
-      success: false, 
-      message: 'Authorization header missing' 
+    return res.status(401).json({
+      success: false,
+      message: 'Authorization header missing'
     });
   }
 
   const token = authHeader.split(' ')[1]; // Bearer <token>
 
   if (!token) {
-    return res.status(401).json({ 
-      success: false, 
-      message: 'Token missing' 
+    return res.status(401).json({
+      success: false,
+      message: 'Token missing'
     });
   }
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    console.log('DECODED TOKEN:', decoded);
-    req.user = decoded; // { id, shop_id, role, phone/name }
+    req.user = decoded; // { id, shop_id, role, phone, name }
+
+    // Optional: set shop context per request if needed for RLS
+    if (decoded.shop_id) {
+      const client = await pool.connect();
+      try {
+        await client.query('SELECT set_config($1, $2, false)', [
+          'app.current_shop_id',
+          decoded.shop_id
+        ]);
+      } finally {
+        client.release();
+      }
+    }
+
     next();
   } catch (error) {
-    return res.status(403).json({ 
-      success: false, 
-      message: 'Invalid or expired token' 
+    console.error('JWT verification failed:', error.message);
+    return res.status(403).json({
+      success: false,
+      message: 'Invalid or expired token'
     });
   }
 };
 
-// Check if user is owner
+// Check if user is OWNER
 const requireOwner = (req, res, next) => {
   if (req.user.role !== 'OWNER') {
-    return res.status(403).json({ 
-      success: false, 
-      message: 'Owner access required' 
+    return res.status(403).json({
+      success: false,
+      message: 'Owner access required'
     });
   }
   next();
 };
 
-// Check if user is staff
+// Check if user is STAFF
 const requireStaff = (req, res, next) => {
   if (req.user.role !== 'STAFF') {
-    return res.status(403).json({ 
-      success: false, 
-      message: 'Staff access required' 
+    return res.status(403).json({
+      success: false,
+      message: 'Staff access required'
     });
   }
   next();
 };
 
-const client = await pool.connect()
-
-await client.query(
-  'SELECT set_config($1, $2, false)',
-  ['app.current_shop_id', req.user.shop_id]
-)
-
-module.exports = { 
-  authenticateJWT, 
-  requireOwner, 
-  requireStaff 
+module.exports = {
+  authenticateJWT,
+  requireOwner,
+  requireStaff
 };
