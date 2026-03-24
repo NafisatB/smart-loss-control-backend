@@ -15,7 +15,7 @@ const alertsRoutes = require("./routes/alertsRoutes");
 const auditRoutes = require("./routes/auditRoutes");
 const reportsRoutes = require("./routes/reportsRoutes");
 const staffRoutes = require('./routes/staffRoutes')
-const staffRoutes = require('./routes/staffRoutes')
+
 
 
 const app = express();

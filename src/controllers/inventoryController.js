@@ -134,7 +134,7 @@ const getInventorySummary = async (req, res) => {
         (i.quantity * i.selling_price) as total_value
       FROM inventory i
       JOIN skus s ON i.sku_id = s.id
-      WHERE i.shop_id = $1 AND s.size = '1L'
+      WHERE i.shop_id = $1
       ORDER BY s.brand, s.size`,
       [shop_id]
     );
